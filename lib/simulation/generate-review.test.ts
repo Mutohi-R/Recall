@@ -61,6 +61,43 @@ describe('generateReview', () => {
     expect(total / correctCount).toBeLessThan(typicalMs);
   });
 
+  it('keeps correct-response times bounded even when the implied z-score is extreme', () => {
+    // theta - trueR up to ~0.9, divided by a tiny c => impliedZ in the dozens
+    // if uncapped. With MAX_IMPLIED_Z = 4 and this learner/config, the most
+    // extreme a *correct* response can be is mean + std*(4 + noise) on the
+    // log scale; noise alone (responseTimeSignalNoise up to 1.5) could in
+    // principle push a single draw further, but across many draws the
+    // average implied contribution from z should never blow up the way an
+    // unbounded z would.
+    const learner = createSyntheticLearner('l1', 'matched', createRng(1));
+    const tinyC = { targetRetrievability: 0.9, responseTimeConstant: 0.01 };
+    const rng = createRng(99);
+    const n = 2000;
+    let maxLogMs = -Infinity;
+    for (let i = 0; i < n; i++) {
+      // elapsed far beyond stability => trueR near 0, so theta - trueR ~ 0.9,
+      // and with c = 0.01 the unclamped impliedZ would be ~90.
+      const item = {
+        learnerId: 'l1',
+        cardId: 'c1',
+        trueStability: 1,
+        lastReviewedAt: null,
+      };
+      const review = generateReview(learner, item, 50, tinyC, rng);
+      if (review.correct) {
+        maxLogMs = Math.max(maxLogMs, Math.log(review.responseTimeMs));
+      }
+    }
+    // Bound: mean + std*(MAX_IMPLIED_Z + a generous allowance for noise), on
+    // the log-ms scale (trueMeanLogResponseTime is in log-seconds).
+    const bound =
+      learner.trueMeanLogResponseTime +
+      Math.log(1000) +
+      learner.trueStdLogResponseTime *
+        (4 + 6 * learner.responseTimeSignalNoise);
+    expect(maxLogMs).toBeLessThan(bound);
+  });
+
   it('draws incorrect-response times from the baseline distribution, independent of true R', () => {
     const learner = createSyntheticLearner('l1', 'matched', createRng(1));
     const typicalLogMs = learner.trueMeanLogResponseTime + Math.log(1000);

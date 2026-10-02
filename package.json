@@ -8,7 +8,7 @@
     "generate": "nuxt generate",
     "preview": "nuxt preview",
     "postinstall": "nuxt prepare",
-    "test": "vitest",
+    "test": "vitest run",
     "simulate": "tsx scripts/run-simulation.ts"
   },
   "dependencies": {

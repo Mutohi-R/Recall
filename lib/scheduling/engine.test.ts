@@ -68,7 +68,15 @@ describe('processReview', () => {
       event(true, new Date('2026-01-02')),
       config,
     ).updatedItem;
-    // reviewCount is now 2, equal to coldStartItemReviews -> this review transitions it
+    // reviewCount is now 2, equal to coldStartItemReviews -> this review transitions it.
+    // It is still a correct response on the adaptive path, so it does not just
+    // adopt the prior (7) unchanged - it also runs that prior through the same
+    // correction-then-growth update any other adaptive review would get
+    // (elapsed = 1 day, rHat = targetRetrievability = 0.9 since the learner has
+    // no response-time history yet): corrected = 0.7*7 + 0.3*(-1/ln(0.9)) ≈
+    // 7.7474, then growth 7.7474*(1+0.1*0.1) ≈ 7.8248. Asserting this exact
+    // value (not just "not null") is what actually confirms the prior of 7 was
+    // used, rather than e.g. the global default.
     const learnerWithPrior = { ...emptyLearner, priorStability: 7 };
     const result = processReview(
       item,
@@ -77,7 +85,7 @@ describe('processReview', () => {
       config,
     );
     expect(result.pathUsed).toBe('adaptive');
-    expect(result.updatedItem.stability).not.toBeNull();
+    expect(result.updatedItem.stability).toBeCloseTo(7.8248, 4);
     expect(result.updatedItem.reviewCount).toBe(3);
   });
 

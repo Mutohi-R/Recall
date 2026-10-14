@@ -12,7 +12,7 @@ import {
   createSyntheticItemState,
 } from '../lib/simulation/synthetic-learner';
 import {
-  simulateItemDayLoop,
+  simulateLearnerDayLoop,
   DEFAULT_DAY_LOOP_CONFIG,
   type SchedulerPolicy,
   type DayLoopResult,
@@ -30,24 +30,27 @@ const ITEMS_PER_LEARNER = 20;
 // Selection rule: lowest mean reviews/item among candidates with mean
 // retention >= 0.75 (see fit-parameters.ts for why 0.75 rather than the
 // original 0.85 - that floor turned out not to be reachable under
-// defensible parameter ranges). This fitted run reached mean retention
-// 0.767 at 57.5 reviews/item on the fitting set itself.
+// defensible parameter ranges). Refitted after the simulation was changed so
+// that a learner's items share one learner state (response-time statistics
+// and the learner prior), as the deployed application does. Only 2 of the 300
+// valid candidates met the floor; the winner reached mean retention 0.833 at
+// 81.9 reviews/item on the fitting set itself.
 const engineConfig: EngineConfig = {
   targetRetrievability: 0.9,
-  responseTimeConstant: 0.129713098583743,
-  minRetrievability: 0.5604161683353596,
-  maxRetrievability: 0.9834710553055629,
-  incorrectRetrievability: 0.20307390495436267,
-  stabilitySmoothing: 0.5617471293080598,
-  stabilityGrowthRate: 0.5079927656729705,
-  minIntervalForCorrection: 2.3586574717657642,
-  maxStabilityChangePerReview: 30.099107412155718,
-  lapseFactor: 0.9230757016222924,
-  stabilityFloor: 16.996259023901075,
-  stabilityMax: 5571.329655721784,
+  responseTimeConstant: 0.18445288515649738,
+  minRetrievability: 0.6656369260745123,
+  maxRetrievability: 0.922449569918681,
+  incorrectRetrievability: 0.1872634220169857,
+  stabilitySmoothing: 0.42140473050530997,
+  stabilityGrowthRate: 0.43911433578468856,
+  minIntervalForCorrection: 2.119048347021453,
+  maxStabilityChangePerReview: 15.974363404791802,
+  lapseFactor: 0.9213599127717316,
+  stabilityFloor: 17.859769777860492,
+  stabilityMax: 36080.01780243241,
   coldStartItemReviews: 5,
-  coldStartLearnerReviews: 21,
-  defaultPriorStability: 9.634129844838753,
+  coldStartLearnerReviews: 16,
+  defaultPriorStability: 5.398961414815858,
 };
 
 interface Aggregate {
@@ -61,7 +64,11 @@ function mean(values: number[]): number {
 }
 
 function runAll(): Aggregate[] {
-  const policies: SchedulerPolicy[] = ['adaptive', 'sm2-only'];
+  const policies: SchedulerPolicy[] = [
+    'adaptive',
+    'adaptive-default-prior',
+    'sm2-only',
+  ];
   const conditions: GenerativeCondition[] = ['matched', 'mismatched'];
 
   const aggregates: Aggregate[] = [];
@@ -71,10 +78,13 @@ function runAll(): Aggregate[] {
     }
   }
 
-  // One shared rng stream per (learner, item, condition), reused across the
-  // two policies so both are evaluated against exactly the same synthetic
-  // learners, items, and outcome draws - otherwise a difference could just
-  // be sampling noise rather than a scheduling-policy effect.
+  // One rng stream per (learner, item, condition), recreated from the same
+  // seed for each policy, so both policies are evaluated against exactly the
+  // same synthetic learners, items, and outcome draws - otherwise a
+  // difference could just be sampling noise rather than a scheduling-policy
+  // effect. All of one learner's items are simulated together, sharing one
+  // scheduler-side learner state (response-time statistics and the learner
+  // prior), as in the deployed application (3.7.3, 3.7.6).
   for (let l = 0; l < LEARNERS; l++) {
     for (const condition of conditions) {
       const learnerSeed = SEED + l * 7919 + (condition === 'matched' ? 0 : 1);
@@ -85,7 +95,7 @@ function runAll(): Aggregate[] {
         learnerRng,
       );
 
-      for (let i = 0; i < ITEMS_PER_LEARNER; i++) {
+      const itemSpecs = Array.from({ length: ITEMS_PER_LEARNER }, (_, i) => {
         const itemSeed = learnerSeed + i * 104729;
         const itemRng = createRng(itemSeed);
         const initialItem = createSyntheticItemState(
@@ -93,22 +103,24 @@ function runAll(): Aggregate[] {
           `card-${i}`,
           itemRng,
         );
+        return { initialItem, itemSeed };
+      });
 
-        for (const policy of policies) {
-          const runRng = createRng(itemSeed); // identical stream per (learner, item, condition) across policies
-          const result = simulateItemDayLoop({
-            learner,
+      for (const policy of policies) {
+        const { results } = simulateLearnerDayLoop({
+          learner,
+          items: itemSpecs.map(({ initialItem, itemSeed }) => ({
             initialItem,
-            policy,
-            engineConfig,
-            dayLoopConfig: DEFAULT_DAY_LOOP_CONFIG,
-            rng: runRng,
-          });
-          const aggregate = aggregates.find(
-            (a) => a.policy === policy && a.condition === condition,
-          )!;
-          aggregate.results.push(result);
-        }
+            rng: createRng(itemSeed), // identical stream per item across policies
+          })),
+          policy,
+          engineConfig,
+          dayLoopConfig: DEFAULT_DAY_LOOP_CONFIG,
+        });
+        const aggregate = aggregates.find(
+          (a) => a.policy === policy && a.condition === condition,
+        )!;
+        aggregate.results.push(...results);
       }
     }
   }
@@ -125,11 +137,12 @@ function report(aggregates: Aggregate[]): void {
 
   console.log(
     'condition'.padEnd(12) +
-      'policy'.padEnd(12) +
+      'policy'.padEnd(24) +
       'reviews/item'.padEnd(16) +
       'retention'.padEnd(12) +
       'converged %'.padEnd(14) +
-      'median conv. review',
+      'median conv. review'.padEnd(22) +
+      'transitions w/ prior %',
   );
 
   for (const { policy, condition, results } of aggregates) {
@@ -147,15 +160,32 @@ function report(aggregates: Aggregate[]): void {
         ? median(convergedResults.map((r) => r.convergedAtReview as number))
         : NaN;
 
+    // Of the items that left the SM-2 fallback, how many found a learner
+    // prior already formed by the learner's other items (3.7.6) rather than
+    // falling back on the global default.
+    const transitioned = results.filter(
+      (r) => r.transitionUsedLearnerPrior !== null,
+    );
+    const priorPct =
+      transitioned.length > 0
+        ? (
+            (transitioned.filter((r) => r.transitionUsedLearnerPrior).length /
+              transitioned.length) *
+            100
+          ).toFixed(1)
+        : 'n/a';
+
     console.log(
       condition.padEnd(12) +
-        policy.padEnd(12) +
+        policy.padEnd(24) +
         mean(reviewCounts).toFixed(1).padEnd(16) +
         retentionRate.toFixed(3).padEnd(12) +
         convergedPct.toFixed(1).padEnd(14) +
         (Number.isNaN(medianConvergedReview)
           ? 'n/a'
-          : medianConvergedReview.toFixed(1)),
+          : medianConvergedReview.toFixed(1)
+        ).padEnd(22) +
+        priorPct,
     );
   }
 }

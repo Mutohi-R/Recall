@@ -59,7 +59,7 @@ import {
   createSyntheticItemState,
 } from '../lib/simulation/synthetic-learner';
 import {
-  simulateItemDayLoop,
+  simulateLearnerDayLoop,
   DEFAULT_DAY_LOOP_CONFIG,
   type DayLoopResult,
 } from '../lib/simulation/day-loop';
@@ -102,25 +102,29 @@ const RETENTION_FLOOR = 0.75;
 // filtered out or re-selected against.
 const NEAR_DAILY_REVIEW_THRESHOLD = 100;
 
-interface SweepItem {
+interface SweepLearner {
   learner: ReturnType<typeof createSyntheticLearner>;
-  initialItem: ReturnType<typeof createSyntheticItemState>;
-  itemSeed: number;
+  items: {
+    initialItem: ReturnType<typeof createSyntheticItemState>;
+    itemSeed: number;
+  }[];
 }
 
-// A fixed item set, built once per (fitting|evaluation) role and reused
+// A fixed learner set, built once per (fitting|evaluation) role and reused
 // across every theta level and every candidate within a level, so
 // differences reflect the config under test and not sampling noise in who
 // got simulated. Always the 'matched' condition, as fit-parameters.ts uses
 // for fitting - the point of the mismatched condition is to stress-test an
-// already-fitted algorithm, not to influence the fit itself.
+// already-fitted algorithm, not to influence the fit itself. A learner's
+// items are kept together because they are simulated together, sharing one
+// scheduler-side learner state (3.7.3, 3.7.6).
 function buildItemSet(
   seed: number,
   learners: number,
   itemsPerLearner: number,
   prefix: string,
-): SweepItem[] {
-  const items: SweepItem[] = [];
+): SweepLearner[] {
+  const set: SweepLearner[] = [];
   for (let l = 0; l < learners; l++) {
     const learnerSeed = seed + l * 7919;
     const learnerRng = createRng(learnerSeed);
@@ -130,6 +134,7 @@ function buildItemSet(
       learnerRng,
     );
 
+    const items = [];
     for (let i = 0; i < itemsPerLearner; i++) {
       const itemSeed = learnerSeed + i * 104729;
       const itemRng = createRng(itemSeed);
@@ -138,10 +143,11 @@ function buildItemSet(
         `${prefix}-card-${i}`,
         itemRng,
       );
-      items.push({ learner, initialItem, itemSeed });
+      items.push({ initialItem, itemSeed });
     }
+    set.push({ learner, items });
   }
-  return items;
+  return set;
 }
 
 interface CandidateStats {
@@ -150,19 +156,22 @@ interface CandidateStats {
   meanReviews: number;
 }
 
-function evaluateOn(config: EngineConfig, items: SweepItem[]): CandidateStats {
-  const results: DayLoopResult[] = items.map(
-    ({ learner, initialItem, itemSeed }) => {
-      const runRng = createRng(itemSeed); // same stream per item across every candidate/level
-      return simulateItemDayLoop({
+function evaluateOn(
+  config: EngineConfig,
+  learners: SweepLearner[],
+): CandidateStats {
+  const results: DayLoopResult[] = learners.flatMap(
+    ({ learner, items }) =>
+      simulateLearnerDayLoop({
         learner,
-        initialItem,
+        items: items.map(({ initialItem, itemSeed }) => ({
+          initialItem,
+          rng: createRng(itemSeed), // same stream per item across every candidate/level
+        })),
         policy: 'adaptive',
         engineConfig: config,
         dayLoopConfig: DEFAULT_DAY_LOOP_CONFIG,
-        rng: runRng,
-      });
-    },
+      }).results,
   );
 
   const meanRetention =
@@ -193,7 +202,7 @@ interface LevelResult {
 
 function fitAtTheta(
   theta: number,
-  fittingSet: SweepItem[],
+  fittingSet: SweepLearner[],
 ): {
   floorWinner: CandidateStats | null;
   bestRetention: CandidateStats | null;

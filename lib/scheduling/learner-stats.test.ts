@@ -2,7 +2,9 @@ import { describe, it, expect } from 'vitest';
 import {
   updateResponseTimeStats,
   computeMedianStability,
+  refreshPriorStability,
 } from './learner-stats';
+import { createInitialItemState } from './sm2';
 import type { LearnerState } from './types';
 
 const emptyLearner: LearnerState = {
@@ -42,5 +44,46 @@ describe('computeMedianStability', () => {
 
   it('averages the two middle values for an even-length list', () => {
     expect(computeMedianStability([1, 2, 3, 4])).toBe(2.5);
+  });
+});
+
+describe('refreshPriorStability', () => {
+  const itemWith = (cardId: string, stability: number | null) => ({
+    ...createInitialItemState('l1', cardId),
+    stability,
+  });
+
+  it('leaves the prior null while no item is on the adaptive path', () => {
+    const result = refreshPriorStability(emptyLearner, [
+      itemWith('a', null),
+      itemWith('b', null),
+    ]);
+    expect(result.priorStability).toBeNull();
+  });
+
+  it('takes the median over adaptive-path items only, ignoring items still on SM-2', () => {
+    const result = refreshPriorStability(emptyLearner, [
+      itemWith('a', 4),
+      itemWith('b', null),
+      itemWith('c', 100),
+      itemWith('d', 10),
+    ]);
+    expect(result.priorStability).toBe(10); // median of [4, 10, 100]
+  });
+
+  it('replaces an earlier prior and leaves the other learner fields alone', () => {
+    const before: LearnerState = {
+      ...emptyLearner,
+      rtCount: 7,
+      meanLogResponseTime: 1.2,
+      priorStability: 3,
+    };
+    const result = refreshPriorStability(before, [
+      itemWith('a', 8),
+      itemWith('b', 12),
+    ]);
+    expect(result.priorStability).toBe(10);
+    expect(result.rtCount).toBe(7);
+    expect(result.meanLogResponseTime).toBe(1.2);
   });
 });

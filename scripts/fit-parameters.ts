@@ -40,7 +40,7 @@ import {
   createSyntheticItemState,
 } from '../lib/simulation/synthetic-learner';
 import {
-  simulateItemDayLoop,
+  simulateLearnerDayLoop,
   DEFAULT_DAY_LOOP_CONFIG,
   type DayLoopResult,
 } from '../lib/simulation/day-loop';
@@ -64,18 +64,21 @@ const MAX_SAMPLE_ATTEMPTS = 20000; // safety cap in case the validity rate is ve
 
 const RETENTION_FLOOR = 0.75;
 
-interface FittingItem {
+interface FittingLearner {
   learner: ReturnType<typeof createSyntheticLearner>;
-  initialItem: ReturnType<typeof createSyntheticItemState>;
-  itemSeed: number;
+  items: {
+    initialItem: ReturnType<typeof createSyntheticItemState>;
+    itemSeed: number;
+  }[];
 }
 
 // A fixed fitting set, built once and reused (with the same rng seed per
 // item) across every candidate, so differences between candidates reflect
 // the candidate's EngineConfig and not sampling noise in who/what got
-// simulated.
-function buildFittingSet(): FittingItem[] {
-  const items: FittingItem[] = [];
+// simulated. Each learner's items are kept together because they are
+// simulated together, sharing one scheduler-side learner state (3.7.3, 3.7.6).
+function buildFittingSet(): FittingLearner[] {
+  const learners: FittingLearner[] = [];
   for (let l = 0; l < FITTING_LEARNERS; l++) {
     const learnerSeed = FITTING_SEED + l * 7919;
     const learnerRng = createRng(learnerSeed);
@@ -85,6 +88,7 @@ function buildFittingSet(): FittingItem[] {
       learnerRng,
     );
 
+    const items = [];
     for (let i = 0; i < FITTING_ITEMS_PER_LEARNER; i++) {
       const itemSeed = learnerSeed + i * 104729;
       const itemRng = createRng(itemSeed);
@@ -93,10 +97,11 @@ function buildFittingSet(): FittingItem[] {
         `fit-card-${i}`,
         itemRng,
       );
-      items.push({ learner, initialItem, itemSeed });
+      items.push({ initialItem, itemSeed });
     }
+    learners.push({ learner, items });
   }
-  return items;
+  return learners;
 }
 
 interface CandidateStats {
@@ -107,20 +112,20 @@ interface CandidateStats {
 
 function evaluateCandidate(
   config: EngineConfig,
-  fittingSet: FittingItem[],
+  fittingSet: FittingLearner[],
 ): CandidateStats {
-  const results: DayLoopResult[] = fittingSet.map(
-    ({ learner, initialItem, itemSeed }) => {
-      const runRng = createRng(itemSeed); // same stream per item across every candidate
-      return simulateItemDayLoop({
+  const results: DayLoopResult[] = fittingSet.flatMap(
+    ({ learner, items }) =>
+      simulateLearnerDayLoop({
         learner,
-        initialItem,
+        items: items.map(({ initialItem, itemSeed }) => ({
+          initialItem,
+          rng: createRng(itemSeed), // same stream per item across every candidate
+        })),
         policy: 'adaptive',
         engineConfig: config,
         dayLoopConfig: DEFAULT_DAY_LOOP_CONFIG,
-        rng: runRng,
-      });
-    },
+      }).results,
   );
 
   const meanRetention =

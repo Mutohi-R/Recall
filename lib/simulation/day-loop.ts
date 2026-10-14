@@ -3,6 +3,7 @@ import type { SyntheticLearner, SyntheticItemState } from './types';
 import { generateReview } from './generate-review';
 import { processReview } from '../scheduling/engine';
 import { createInitialItemState, applySM2 } from '../scheduling/sm2';
+import { refreshPriorStability } from '../scheduling/learner-stats';
 import type {
   EngineConfig,
   ItemState,
@@ -47,7 +48,17 @@ function applyTrueStabilityUpdate(
   return Math.min(engineConfig.stabilityMax, grown);
 }
 
-export type SchedulerPolicy = 'adaptive' | 'sm2-only';
+// 'adaptive-default-prior' is the adaptive algorithm with exactly one thing
+// switched off: the learner prior of 3.7.6 is never formed, so every item
+// that leaves the SM-2 fallback starts from the fixed global default
+// stability. Response-time statistics are still pooled across the learner's
+// items. It exists only so the claim in 3.9.1 - that initialising from a
+// learner prior improves on a fixed default - can be tested as a comparison
+// against 'adaptive' rather than just assumed.
+export type SchedulerPolicy =
+  | 'adaptive'
+  | 'adaptive-default-prior'
+  | 'sm2-only';
 
 // Not fixed by the thesis text (3.9.1 leaves these as "will be reported with
 // the results") — agreed defaults, not derived values.
@@ -87,41 +98,90 @@ export interface DayLoopResult {
   probeTrueRetrievability: number;
   convergedAtReview: number | null; // 1-based index among adaptive-path reviews; null if never
   didNotConverge: boolean; // true once convergenceMaxReviews adaptive reviews passed with no convergence
+  // Whether the learner prior (3.7.6) existed at the moment this item left the
+  // SM-2 fallback and had its stability initialised. true = initialised from
+  // the learner's median stability; false = no other item was on the adaptive
+  // path yet, so the global default was used; null = the item never reached
+  // the adaptive path (or the policy is sm2-only).
+  transitionUsedLearnerPrior: boolean | null;
   trace: DayLoopTraceEntry[];
+}
+
+export interface DayLoopItemInput {
+  initialItem: SyntheticItemState;
+  // Each item draws from its own random stream, so an item's outcomes depend
+  // only on its own review history and not on how many reviews other items
+  // happened to receive. This is what lets the two policies be compared on
+  // identical draws (see scripts/run-simulation.ts).
+  rng: Rng;
+}
+
+export interface LearnerDayLoopResult {
+  results: DayLoopResult[]; // one per input item, in input order
+  finalLearner: LearnerState; // the shared scheduler-side learner state at the end
 }
 
 function dateFromDay(day: number): Date {
   return new Date(Date.UTC(2026, 0, 1) + day * 24 * 60 * 60 * 1000);
 }
 
+// Everything the loop tracks for one item. The scheduler-side learner state
+// is deliberately NOT in here: it belongs to the learner and is shared by
+// all of that learner's items.
+interface ItemRun {
+  cardId: string;
+  rng: Rng;
+  schedulerItem: ItemState;
+  trueStability: number;
+  lastReviewedDay: number | null;
+  dueDay: number;
+  reviewCount: number;
+  adaptiveReviewIndex: number;
+  consecutiveWithinBand: number;
+  convergedAtReview: number | null;
+  didNotConverge: boolean;
+  transitionUsedLearnerPrior: boolean | null;
+  trace: DayLoopTraceEntry[];
+}
+
 /**
- * Simulates one synthetic item, under one scheduling policy, as a literal
- * day-by-day loop (thesis 3.9.1: "moved through a timeline day by day...
- * items that become due will be reviewed"), followed by a single held-out
- * retention probe at the test point. The probe never updates scheduler or
- * ground-truth state — it only measures.
+ * Simulates one synthetic learner and all of their items, under one
+ * scheduling policy, as a literal day-by-day loop (thesis 3.9.1: "moved
+ * through a timeline day by day... items that become due will be reviewed"),
+ * followed by a single held-out retention probe per item at the test point.
+ * The probe never updates scheduler or ground-truth state - it only measures.
+ *
+ * The learner's items share ONE scheduler-side LearnerState, as in the
+ * deployed application (3.7.3, 3.7.6):
+ *  - the response-time mean and spread (mu, sigma) and the count n_rt pool the
+ *    correct responses from every item the learner reviews;
+ *  - the learner prior S-bar is the median stability of the learner's items
+ *    already on the adaptive path, recomputed after every review (3.7.8), so
+ *    an item that leaves the fallback later is initialised from whatever the
+ *    learner's other items have reached by then.
+ * Items are all introduced on day 0 (as in the earlier one-item-at-a-time
+ * version of this loop), and items due on the same day are reviewed in input
+ * order, so on a day when several items leave the fallback together, the
+ * earlier ones in that order are initialised first and later ones can use
+ * the prior they have just helped to form.
  *
  * processReview already handles the cold-start/adaptive routing internally
  * (it returns pathUsed: 'sm2' while item.reviewCount < coldStartItemReviews),
- * so the 'adaptive' policy here always just calls processReview — this loop
+ * so the 'adaptive' policy here always just calls processReview - this loop
  * doesn't need to replicate that branch. The 'sm2-only' baseline bypasses
- * processReview entirely and always calls applySM2 directly.
+ * processReview entirely and always calls applySM2 directly; it never reads
+ * or writes the shared learner state, so each of its items behaves
+ * independently of the others.
  */
-export function simulateItemDayLoop(options: {
+export function simulateLearnerDayLoop(options: {
   learner: SyntheticLearner;
-  initialItem: SyntheticItemState;
+  items: DayLoopItemInput[];
   policy: SchedulerPolicy;
   engineConfig: EngineConfig;
   dayLoopConfig: DayLoopConfig;
-  rng: Rng;
-}): DayLoopResult {
-  const { learner, initialItem, policy, engineConfig, dayLoopConfig, rng } =
-    options;
+}): LearnerDayLoopResult {
+  const { learner, items, policy, engineConfig, dayLoopConfig } = options;
 
-  let schedulerItem: ItemState = createInitialItemState(
-    learner.learnerId,
-    initialItem.cardId,
-  );
   let learnerState: LearnerState = {
     learnerId: learner.learnerId,
     meanLogResponseTime: null,
@@ -131,29 +191,35 @@ export function simulateItemDayLoop(options: {
     priorStability: null,
   };
 
-  let trueStability = initialItem.trueStability;
-  let lastReviewedDay: number | null = null;
-  let dueDay = 0; // the item is introduced, and first becomes due, on day 0
+  const runs: ItemRun[] = items.map(({ initialItem, rng }) => ({
+    cardId: initialItem.cardId,
+    rng,
+    schedulerItem: createInitialItemState(
+      learner.learnerId,
+      initialItem.cardId,
+    ),
+    trueStability: initialItem.trueStability,
+    lastReviewedDay: null,
+    dueDay: 0, // every item is introduced, and first becomes due, on day 0
+    reviewCount: 0,
+    adaptiveReviewIndex: 0,
+    consecutiveWithinBand: 0,
+    convergedAtReview: null,
+    didNotConverge: false,
+    transitionUsedLearnerPrior: null,
+    trace: [],
+  }));
 
-  let reviewCount = 0;
-  let adaptiveReviewIndex = 0;
-  let consecutiveWithinBand = 0;
-  let convergedAtReview: number | null = null;
-  let didNotConverge = false;
-
-  const trace: DayLoopTraceEntry[] = [];
-
-  for (let day = 0; day <= dayLoopConfig.studyPeriodDays; day++) {
-    if (dueDay > day) continue; // not due yet — nothing happens today for this item
-
-    const elapsedDays = lastReviewedDay === null ? 0 : day - lastReviewedDay;
+  const reviewOnce = (run: ItemRun, day: number): void => {
+    const elapsedDays =
+      run.lastReviewedDay === null ? 0 : day - run.lastReviewedDay;
 
     const generated = generateReview(
       learner,
       {
         learnerId: learner.learnerId,
-        cardId: initialItem.cardId,
-        trueStability,
+        cardId: run.cardId,
+        trueStability: run.trueStability,
         lastReviewedAt: null,
       },
       elapsedDays,
@@ -161,10 +227,10 @@ export function simulateItemDayLoop(options: {
         targetRetrievability: engineConfig.targetRetrievability,
         responseTimeConstant: engineConfig.responseTimeConstant,
       },
-      rng,
+      run.rng,
     );
 
-    reviewCount += 1;
+    run.reviewCount += 1;
 
     const event: ReviewEvent = {
       correct: generated.correct,
@@ -177,28 +243,46 @@ export function simulateItemDayLoop(options: {
     let nextDueDay: number;
 
     if (policy === 'sm2-only') {
-      schedulerItem = applySM2(schedulerItem, event);
+      run.schedulerItem = applySM2(run.schedulerItem, event);
       path = 'sm2';
-      nextDueDay = day + Math.max(1, schedulerItem.intervalDays);
+      nextDueDay = day + Math.max(1, run.schedulerItem.intervalDays);
     } else {
+      // The transition review is the one that finds reviewCount equal to the
+      // threshold; record whether a learner prior existed for it to use.
+      if (
+        run.schedulerItem.reviewCount === engineConfig.coldStartItemReviews &&
+        run.transitionUsedLearnerPrior === null
+      ) {
+        run.transitionUsedLearnerPrior = learnerState.priorStability !== null;
+      }
+
       const outcome = processReview(
-        schedulerItem,
+        run.schedulerItem,
         learnerState,
         event,
         engineConfig,
       );
-      schedulerItem = outcome.updatedItem;
-      learnerState = outcome.updatedLearner;
+      run.schedulerItem = outcome.updatedItem;
+      // Item-level values first, then learner-level (3.7.8): response-time
+      // statistics come back from processReview, and the prior is recomputed
+      // from every item of this learner, including the one just updated.
+      learnerState =
+        policy === 'adaptive-default-prior'
+          ? outcome.updatedLearner // prior never formed: stays null
+          : refreshPriorStability(
+              outcome.updatedLearner,
+              runs.map((r) => r.schedulerItem),
+            );
       path = outcome.pathUsed;
-      estimatedStability = schedulerItem.stability;
+      estimatedStability = run.schedulerItem.stability;
 
       const intervalDays =
         (outcome.nextReviewAt.getTime() - dateFromDay(day).getTime()) /
         (1000 * 60 * 60 * 24);
       nextDueDay = day + Math.max(1, Math.round(intervalDays));
 
-      if (path === 'adaptive' && !didNotConverge) {
-        adaptiveReviewIndex += 1;
+      if (path === 'adaptive' && !run.didNotConverge) {
+        run.adaptiveReviewIndex += 1;
 
         const lower =
           engineConfig.targetRetrievability -
@@ -211,92 +295,106 @@ export function simulateItemDayLoop(options: {
           generated.trueRetrievability <= upper;
 
         if (withinBand) {
-          consecutiveWithinBand += 1;
+          run.consecutiveWithinBand += 1;
           if (
-            convergedAtReview === null &&
-            consecutiveWithinBand >=
+            run.convergedAtReview === null &&
+            run.consecutiveWithinBand >=
               dayLoopConfig.convergenceConsecutiveRequired
           ) {
-            convergedAtReview = adaptiveReviewIndex;
+            run.convergedAtReview = run.adaptiveReviewIndex;
           }
         } else {
-          consecutiveWithinBand = 0;
+          run.consecutiveWithinBand = 0;
         }
 
         if (
-          convergedAtReview === null &&
-          adaptiveReviewIndex >= dayLoopConfig.convergenceMaxReviews
+          run.convergedAtReview === null &&
+          run.adaptiveReviewIndex >= dayLoopConfig.convergenceMaxReviews
         ) {
-          didNotConverge = true;
+          run.didNotConverge = true;
         }
       }
     }
 
-    trueStability = applyTrueStabilityUpdate(
-      trueStability,
+    run.trueStability = applyTrueStabilityUpdate(
+      run.trueStability,
       generated.trueRetrievability,
       generated.correct,
       engineConfig,
     );
 
-    trace.push({
+    run.trace.push({
       day,
-      reviewIndex: reviewCount,
+      reviewIndex: run.reviewCount,
       kind: 'review',
       path,
       correct: generated.correct,
       responseTimeMs: generated.responseTimeMs,
       trueRetrievability: generated.trueRetrievability,
       estimatedStability,
-      trueStabilityAfter: trueStability,
+      trueStabilityAfter: run.trueStability,
     });
 
-    lastReviewedDay = day;
-    dueDay = nextDueDay;
+    run.lastReviewedDay = day;
+    run.dueDay = nextDueDay;
+  };
+
+  for (let day = 0; day <= dayLoopConfig.studyPeriodDays; day++) {
+    for (const run of runs) {
+      if (run.dueDay > day) continue; // not due yet - nothing happens today for this item
+      reviewOnce(run, day);
+    }
   }
 
-  // Retention test point: a single held-out probe, testPointGapDays after the
-  // study period ends. Does not feed back into scheduler or true-stability state.
+  // Retention test point: a single held-out probe per item, testPointGapDays
+  // after the study period ends. Does not feed back into scheduler or
+  // true-stability state.
   const testDay =
     dayLoopConfig.studyPeriodDays + dayLoopConfig.testPointGapDays;
-  const elapsedAtProbe =
-    lastReviewedDay === null ? testDay : testDay - lastReviewedDay;
-  const probe = generateReview(
-    learner,
-    {
-      learnerId: learner.learnerId,
-      cardId: initialItem.cardId,
-      trueStability,
-      lastReviewedAt: null,
-    },
-    elapsedAtProbe,
-    {
-      targetRetrievability: engineConfig.targetRetrievability,
-      responseTimeConstant: engineConfig.responseTimeConstant,
-    },
-    rng,
-  );
 
-  trace.push({
-    day: testDay,
-    reviewIndex: null,
-    kind: 'probe',
-    path: null,
-    correct: probe.correct,
-    responseTimeMs: probe.responseTimeMs,
-    trueRetrievability: probe.trueRetrievability,
-    estimatedStability: null,
-    trueStabilityAfter: trueStability,
+  const results: DayLoopResult[] = runs.map((run) => {
+    const elapsedAtProbe =
+      run.lastReviewedDay === null ? testDay : testDay - run.lastReviewedDay;
+    const probe = generateReview(
+      learner,
+      {
+        learnerId: learner.learnerId,
+        cardId: run.cardId,
+        trueStability: run.trueStability,
+        lastReviewedAt: null,
+      },
+      elapsedAtProbe,
+      {
+        targetRetrievability: engineConfig.targetRetrievability,
+        responseTimeConstant: engineConfig.responseTimeConstant,
+      },
+      run.rng,
+    );
+
+    run.trace.push({
+      day: testDay,
+      reviewIndex: null,
+      kind: 'probe',
+      path: null,
+      correct: probe.correct,
+      responseTimeMs: probe.responseTimeMs,
+      trueRetrievability: probe.trueRetrievability,
+      estimatedStability: null,
+      trueStabilityAfter: run.trueStability,
+    });
+
+    return {
+      policy,
+      condition: learner.condition,
+      reviewCount: run.reviewCount,
+      retentionCorrect: probe.correct,
+      probeTrueRetrievability: probe.trueRetrievability,
+      convergedAtReview: run.convergedAtReview,
+      didNotConverge: run.didNotConverge,
+      transitionUsedLearnerPrior: run.transitionUsedLearnerPrior,
+      trace: run.trace,
+    };
   });
 
-  return {
-    policy,
-    condition: learner.condition,
-    reviewCount,
-    retentionCorrect: probe.correct,
-    probeTrueRetrievability: probe.trueRetrievability,
-    convergedAtReview,
-    didNotConverge,
-    trace,
-  };
+  return { results, finalLearner: learnerState };
 }

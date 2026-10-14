@@ -1,36 +1,23 @@
 /**
- * Task 6 (Week 2): random-search parameter fitting for the free constants in
- * EngineConfig, per thesis 3.7.7 (hard validity constraints on any candidate)
- * and 3.9.1 (parameters must be selected on a fitting set of synthetic
- * learners distinct from the set used for the final SM2 comparison).
+ * Random-search parameter fitting for the free constants in EngineConfig, per
+ * thesis 3.7.7 (hard validity constraints on any candidate) and 3.9.1
+ * (parameters are selected on a fitting set of synthetic learners distinct
+ * from the set used for the final SM-2 comparison).
  *
  * Fitting is done under the 'matched' condition only (the algorithm's own
- * assumed forgetting shape) - the point of the mismatched condition is to
- * test the fitted algorithm somewhere it was never tuned for, so it must not
- * influence the fit.
+ * assumed forgetting shape); the mismatched condition tests the fitted
+ * algorithm somewhere it was never tuned for, so it must not influence the
+ * fit.
  *
- * Selection rule (chosen from the presented options): among candidates whose
- * mean retention (at the held-out test point) is >= RETENTION_FLOOR, pick the
- * one with the lowest mean reviews per item.
+ * The synthetic learners' memory and response times are fixed properties of
+ * the learners (lib/simulation/memory-model.ts, generate-review.ts) and do not
+ * depend on the candidate being evaluated. The ranges, the world's settings
+ * and the selection rule (selectCandidate in parameter-fitting.ts) were all
+ * fixed before this world was first run.
  *
- * RETENTION_FLOOR was originally set at 0.85, before it was known what this
- * simulation setup (365-day study period, 30-day held-out gap, this
- * synthetic-learner population) could actually deliver. Two rounds of
- * evidence showed 0.85 wasn't reachable under defensible parameter ranges:
- *   - With stabilityGrowthRate in [0.01, 0.3] and lapseFactor in [0.2, 0.8],
- *     the best of 300 valid candidates reached 0.400 retention (mean 0.076).
- *   - Widening to [0.01, 0.6] and [0.2, 0.95] raised the best to 0.800 (mean
- *     0.258) - but the top candidates again sat within a few percent of the
- *     new range edges, the same signal as before.
- * A third widening would have to push lapseFactor toward ~0.98 (a lapse that
- * barely reduces stability at all) specifically to manufacture 0.85, which
- * would no longer describe a plausible lapse per 3.7.5 ("evidence that the
- * stored stability was higher than the learner's actual memory strength
- * justified") - at that point the ranges are being fit to the target rather
- * than the target being evaluated against defensible ranges. RETENTION_FLOOR
- * is set to 0.75 instead: comfortably inside the 0.80 ceiling found above (so
- * the winner isn't just whichever candidate happened to be the single best of
- * 300), using the same [0.01, 0.6] / [0.2, 0.95] ranges as that ceiling run.
+ * 2,000 valid candidates are evaluated, the same number and the same
+ * candidate seed scripts/theta-sweep.ts uses at every theta level, so this
+ * script's winner is, by construction, the theta = 0.90 row of that sweep.
  *
  * Usage: npx tsx scripts/fit-parameters.ts
  */
@@ -47,8 +34,14 @@ import {
 import {
   sampleCandidate,
   isValidCandidate,
+  selectCandidate,
   DEFAULT_SEARCH_RANGES,
+  RETENTION_FLOOR,
+  CONVERGENCE_FLOOR,
+  type CandidateStats,
+  type SelectionRule,
 } from '../lib/simulation/parameter-fitting';
+import { TRUE_RT_SENSITIVITY } from '../lib/simulation/generate-review';
 import type { EngineConfig } from '../lib/scheduling/types';
 
 // Distinct seed range from run-simulation.ts's evaluation set (SEED =
@@ -59,10 +52,8 @@ const CANDIDATE_SEED = 20260401;
 
 const FITTING_LEARNERS = 15;
 const FITTING_ITEMS_PER_LEARNER = 10;
-const VALID_CANDIDATES_TARGET = 300;
-const MAX_SAMPLE_ATTEMPTS = 20000; // safety cap in case the validity rate is very low
-
-const RETENTION_FLOOR = 0.75;
+const VALID_CANDIDATES_TARGET = 2000;
+const MAX_SAMPLE_ATTEMPTS = 200000; // safety cap in case the validity rate is very low
 
 interface FittingLearner {
   learner: ReturnType<typeof createSyntheticLearner>;
@@ -104,12 +95,6 @@ function buildFittingSet(): FittingLearner[] {
   return learners;
 }
 
-interface CandidateStats {
-  config: EngineConfig;
-  meanRetention: number;
-  meanReviews: number;
-}
-
 function evaluateCandidate(
   config: EngineConfig,
   fittingSet: FittingLearner[],
@@ -134,11 +119,15 @@ function evaluateCandidate(
   const meanReviews =
     results.reduce((sum, r) => sum + r.reviewCount, 0) / results.length;
 
-  return { config, meanRetention, meanReviews };
+  const convergenceRate =
+    results.filter((r) => r.convergedAtReview !== null).length / results.length;
+
+  return { config, meanRetention, meanReviews, convergenceRate };
 }
 
 interface FitResult {
   winner: CandidateStats | null;
+  rule: SelectionRule;
   validCount: number;
   sampledCount: number;
   allStats: CandidateStats[];
@@ -163,19 +152,12 @@ function fit(): FitResult {
     allStats.push(evaluateCandidate(candidate, fittingSet));
   }
 
-  const survivors = allStats.filter((s) => s.meanRetention >= RETENTION_FLOOR);
-  const winner =
-    survivors.length > 0
-      ? survivors.reduce((best, s) =>
-          s.meanReviews < best.meanReviews ? s : best,
-        )
-      : null;
-
-  return { winner, validCount, sampledCount, allStats };
+  const { winner, rule } = selectCandidate(allStats);
+  return { winner, rule, validCount, sampledCount, allStats };
 }
 
 function report(result: FitResult): void {
-  const { winner, validCount, sampledCount, allStats } = result;
+  const { winner, rule, validCount, sampledCount, allStats } = result;
 
   console.log(
     `\nParameter fitting: ${FITTING_LEARNERS} learners x ${FITTING_ITEMS_PER_LEARNER} items ` +
@@ -185,24 +167,45 @@ function report(result: FitResult): void {
     `Sampled ${sampledCount} candidates; ${validCount} passed 3.7.7's validity constraints.`,
   );
 
-  const meetingFloor = allStats.filter(
+  const meetingRetention = allStats.filter(
     (s) => s.meanRetention >= RETENTION_FLOOR,
   ).length;
+  const meetingBoth = allStats.filter(
+    (s) =>
+      s.meanRetention >= RETENTION_FLOOR &&
+      s.convergenceRate >= CONVERGENCE_FLOOR,
+  ).length;
   console.log(
-    `${meetingFloor}/${validCount} valid candidates met the retention floor (${RETENTION_FLOOR}).\n`,
+    `${meetingRetention}/${validCount} valid candidates met the retention floor (${RETENTION_FLOOR}); ` +
+      `${meetingBoth} of those also met the convergence floor (${CONVERGENCE_FLOOR}).\n`,
+  );
+
+  const best = (key: 'meanRetention' | 'convergenceRate') =>
+    Math.max(...allStats.map((s) => s[key]));
+  console.log(
+    `Best retention among valid candidates: ${best('meanRetention').toFixed(3)}; ` +
+      `best convergence: ${(best('convergenceRate') * 100).toFixed(1)}%\n`,
   );
 
   if (!winner) {
-    console.log(
-      'No valid candidate met the retention floor. Consider widening DEFAULT_SEARCH_RANGES, ' +
-        'raising VALID_CANDIDATES_TARGET, or reconsidering the retention floor.',
-    );
+    console.log('No valid candidate met the retention floor.');
     return;
   }
 
   console.log(
+    rule === 'both-floors'
+      ? 'Selected under the main rule (both floors met).'
+      : 'No candidate met both floors: selected under the fallback rule ' +
+          '(highest convergence among candidates meeting the retention floor).',
+  );
+  console.log(
     `Winning config: mean retention ${winner.meanRetention.toFixed(3)}, ` +
-      `mean reviews/item ${winner.meanReviews.toFixed(1)}\n`,
+      `mean reviews/item ${winner.meanReviews.toFixed(1)}, ` +
+      `converged ${(winner.convergenceRate * 100).toFixed(1)}%`,
+  );
+  console.log(
+    `Fitted c = ${winner.config.responseTimeConstant.toFixed(4)} ` +
+      `(the synthetic learners' true sensitivity is ${TRUE_RT_SENSITIVITY})\n`,
   );
   console.log(JSON.stringify(winner.config, null, 2));
 }

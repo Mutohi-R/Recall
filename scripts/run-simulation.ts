@@ -1,8 +1,9 @@
 /**
- * Task 5 (Week 2): runs the day-by-day loop across many synthetic learners
- * and items, for both scheduling policies (adaptive vs sm2-only) and both
- * generative conditions (matched vs mismatched), and reports the retention,
- * review-count, and convergence numbers thesis 3.9.1 asks for.
+ * Runs the day-by-day loop across the evaluation set of synthetic learners,
+ * for three policies (the adaptive algorithm; the same algorithm with the
+ * learner prior switched off, which tests the 3.7.6 claim; and SM-2 alone)
+ * under both generative conditions (matched and mismatched), and reports the
+ * retention, review-count and convergence measures thesis 3.9.1 asks for.
  *
  * Usage: npx tsx scripts/run-simulation.ts
  */
@@ -24,33 +25,30 @@ const SEED = 20260201;
 const LEARNERS = 50;
 const ITEMS_PER_LEARNER = 20;
 
-// Fitted by scripts/fit-parameters.ts (Task 6), on a fitting set generated
-// from a seed range distinct from this script's own SEED below, under the
-// 'matched' condition only, per 3.9.1's fit/evaluate separation requirement.
-// Selection rule: lowest mean reviews/item among candidates with mean
-// retention >= 0.75 (see fit-parameters.ts for why 0.75 rather than the
-// original 0.85 - that floor turned out not to be reachable under
-// defensible parameter ranges). Refitted after the simulation was changed so
-// that a learner's items share one learner state (response-time statistics
-// and the learner prior), as the deployed application does. Only 2 of the 300
-// valid candidates met the floor; the winner reached mean retention 0.833 at
-// 81.9 reviews/item on the fitting set itself.
+// Fitted by scripts/fit-parameters.ts on a fitting set generated from a
+// seed range distinct from this script's own SEED, under the 'matched'
+// condition only, per 3.9.1's fit/evaluate separation requirement. The
+// synthetic world (memory-model.ts, generate-review.ts) does not depend on
+// this configuration. Every one of the 2,000 valid candidates met the 0.75
+// retention floor, none met the 90% convergence floor (best 46.7%), so the
+// winner was chosen by the pre-set fallback: highest convergence among
+// candidates meeting the retention floor. On the fitting set it reached
+// retention 0.907 at 10.4 reviews/item, with 46.7% of items converging.
 const engineConfig: EngineConfig = {
   targetRetrievability: 0.9,
-  responseTimeConstant: 0.18445288515649738,
-  minRetrievability: 0.6656369260745123,
-  maxRetrievability: 0.922449569918681,
-  incorrectRetrievability: 0.1872634220169857,
-  stabilitySmoothing: 0.42140473050530997,
-  stabilityGrowthRate: 0.43911433578468856,
-  minIntervalForCorrection: 2.119048347021453,
-  maxStabilityChangePerReview: 15.974363404791802,
-  lapseFactor: 0.9213599127717316,
-  stabilityFloor: 17.859769777860492,
-  stabilityMax: 36080.01780243241,
-  coldStartItemReviews: 5,
-  coldStartLearnerReviews: 16,
-  defaultPriorStability: 5.398961414815858,
+  responseTimeConstant: 0.1344033803418279,
+  minRetrievability: 0.8189361217082478,
+  maxRetrievability: 0.9516600485960953,
+  stabilitySmoothing: 0.5528757312917151,
+  stabilityGrowthRate: 4.101142177383881,
+  minIntervalForCorrection: 0.8719145046081394,
+  maxStabilityChangePerReview: 3.915218826523051,
+  lapseFactor: 0.4338994357851334,
+  stabilityFloor: 19.268873857799917,
+  stabilityMax: 6210.85663505597,
+  coldStartItemReviews: 4,
+  coldStartLearnerReviews: 24,
+  defaultPriorStability: 78.94485344178975,
 };
 
 interface Aggregate {
@@ -142,6 +140,8 @@ function report(aggregates: Aggregate[]): void {
       'retention'.padEnd(12) +
       'converged %'.padEnd(14) +
       'median conv. review'.padEnd(22) +
+      'unresolved %'.padEnd(15) +
+      'true R at adaptive reviews (mean / in band %)'.padEnd(48) +
       'transitions w/ prior %',
   );
 
@@ -175,16 +175,45 @@ function report(aggregates: Aggregate[]): void {
           ).toFixed(1)
         : 'n/a';
 
+    // Items that neither converged nor used up the maximum number of adaptive
+    // reviews: the study period ended first, so the outcome is unknown rather
+    // than a failure to converge.
+    const unresolvedPct =
+      (results.filter((r) => r.convergedAtReview === null && !r.didNotConverge)
+        .length /
+        results.length) *
+      100;
+
+    // How close the scheduler actually came to its target: the true recall
+    // probability at every adaptive-path review.
+    const adaptiveR = results.flatMap((r) =>
+      r.trace
+        .filter((e) => e.kind === 'review' && e.path === 'adaptive')
+        .map((e) => e.trueRetrievability),
+    );
+    const band = DEFAULT_DAY_LOOP_CONFIG.convergenceToleranceBand;
+    const theta = engineConfig.targetRetrievability;
+    const rSummary =
+      adaptiveR.length > 0
+        ? `${mean(adaptiveR).toFixed(3)} / ${(
+            (adaptiveR.filter((r) => Math.abs(r - theta) <= band).length /
+              adaptiveR.length) *
+            100
+          ).toFixed(1)}%`
+        : 'n/a';
+
     console.log(
       condition.padEnd(12) +
         policy.padEnd(24) +
         mean(reviewCounts).toFixed(1).padEnd(16) +
         retentionRate.toFixed(3).padEnd(12) +
-        convergedPct.toFixed(1).padEnd(14) +
+        (policy === 'sm2-only' ? 'n/a' : convergedPct.toFixed(1)).padEnd(14) +
         (Number.isNaN(medianConvergedReview)
           ? 'n/a'
           : medianConvergedReview.toFixed(1)
         ).padEnd(22) +
+        (policy === 'sm2-only' ? 'n/a' : unresolvedPct.toFixed(1)).padEnd(15) +
+        rSummary.padEnd(48) +
         priorPct,
     );
   }
@@ -198,5 +227,64 @@ function median(values: number[]): number {
     : sorted[mid];
 }
 
+// Paired differences between two policies, learner by learner. Both policies
+// see the same learners, items and random draws, so the difference for each
+// learner isolates the policy. Items within one learner are not independent
+// (they share the learner's response-time statistics and prior), so the
+// learner, not the item, is the unit: 50 paired differences per comparison,
+// summarised as a mean with a 95% interval (mean +- 1.96 standard errors).
+function perLearner(results: DayLoopResult[]): {
+  reviews: number;
+  retention: number;
+}[] {
+  const out = [];
+  for (let start = 0; start < results.length; start += ITEMS_PER_LEARNER) {
+    const chunk = results.slice(start, start + ITEMS_PER_LEARNER);
+    out.push({
+      reviews: mean(chunk.map((r) => r.reviewCount)),
+      retention: mean(chunk.map((r) => (r.retentionCorrect ? 1 : 0))),
+    });
+  }
+  return out;
+}
+
+function interval(diffs: number[]): string {
+  const m = mean(diffs);
+  const sd = Math.sqrt(
+    diffs.reduce((sum, d) => sum + (d - m) ** 2, 0) / (diffs.length - 1),
+  );
+  const half = (1.96 * sd) / Math.sqrt(diffs.length);
+  return `${m >= 0 ? '+' : ''}${m.toFixed(3)} +- ${half.toFixed(3)}`;
+}
+
+function reportPaired(aggregates: Aggregate[]): void {
+  console.log(
+    `\nPaired differences per learner (${LEARNERS} learners; mean +- 95% interval):`,
+  );
+  const comparisons: [SchedulerPolicy, SchedulerPolicy][] = [
+    ['adaptive', 'sm2-only'],
+    ['adaptive', 'adaptive-default-prior'],
+  ];
+  for (const condition of ['matched', 'mismatched'] as GenerativeCondition[]) {
+    for (const [a, b] of comparisons) {
+      const find = (policy: SchedulerPolicy) =>
+        perLearner(
+          aggregates.find(
+            (x) => x.policy === policy && x.condition === condition,
+          )!.results,
+        );
+      const pa = find(a);
+      const pb = find(b);
+      console.log(
+        `${condition.padEnd(12)}${`${a} - ${b}`.padEnd(36)}` +
+          `reviews/item ${interval(pa.map((x, i) => x.reviews - pb[i].reviews))}   ` +
+          `retention ${interval(pa.map((x, i) => x.retention - pb[i].retention))}`,
+      );
+    }
+  }
+  console.log();
+}
+
 const aggregates = runAll();
 report(aggregates);
+reportPaired(aggregates);

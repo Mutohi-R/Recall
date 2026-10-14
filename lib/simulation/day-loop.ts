@@ -1,6 +1,7 @@
 import type { Rng } from './rng';
 import type { SyntheticLearner, SyntheticItemState } from './types';
 import { generateReview } from './generate-review';
+import { nextTrueMemoryState } from './memory-model';
 import { processReview } from '../scheduling/engine';
 import { createInitialItemState, applySM2 } from '../scheduling/sm2';
 import { refreshPriorStability } from '../scheduling/learner-stats';
@@ -12,41 +13,12 @@ import type {
   SchedulingPath,
 } from '../scheduling/types';
 
-// The matched/mismatched distinction (3.9.1) is about the *within-review*
-// decay shape (generative-models.ts: exponential vs power law) - not about
-// whether memory is strengthened by review at all. 2.2.3's own argument for
-// why spacing works ("a review does more to strengthen the memory") applies
-// regardless of curve shape, so the true, underlying stability-like scale
-// fed to computeTrueRetrievability evolves via the *same* growth/lapse
-// mechanic 3.7.4/3.7.5 describe, using the same constants as whatever
-// EngineConfig is under test. This is what "the matched condition's
-// assumptions hold exactly" (3.9.1) means: not just the curve shape, but the
-// whole update rule - so there is deliberately no separate, independent set
-// of "true dynamics" constants here (an earlier version of this file had
-// one, and it produced a synthetic population whose real memory grew at a
-// rate disconnected from whatever the algorithm assumed, guaranteeing
-// systematic over- or under-scheduling regardless of tuning).
-//
-// No correction term is used: correction exists only to let a noisy
-// *estimator* close in on a value it doesn't already know, and the
-// generator knows the true state exactly at every point.
-function applyTrueStabilityUpdate(
-  trueStability: number,
-  trueRetrievability: number,
-  correct: boolean,
-  engineConfig: EngineConfig,
-): number {
-  if (!correct) {
-    return Math.max(
-      engineConfig.stabilityFloor,
-      engineConfig.lapseFactor * trueStability,
-    );
-  }
-  const grown =
-    trueStability *
-    (1 + engineConfig.stabilityGrowthRate * (1 - trueRetrievability));
-  return Math.min(engineConfig.stabilityMax, grown);
-}
+// The synthetic learners' true memory (memory-model.ts) and their response
+// times (generate-review.ts) depend only on the synthetic learner and item,
+// never on the EngineConfig under test. An earlier version moved true
+// stability with the candidate's own k, lambda, S_floor and S_max, so the
+// parameter search was partly choosing the world it was then measured in;
+// see memory-model.ts for what that did to the fitted values.
 
 // 'adaptive-default-prior' is the adaptive algorithm with exactly one thing
 // switched off: the learner prior of 3.7.6 is never formed, so every item
@@ -133,6 +105,7 @@ interface ItemRun {
   rng: Rng;
   schedulerItem: ItemState;
   trueStability: number;
+  trueDifficulty: number;
   lastReviewedDay: number | null;
   dueDay: number;
   reviewCount: number;
@@ -199,6 +172,7 @@ export function simulateLearnerDayLoop(options: {
       initialItem.cardId,
     ),
     trueStability: initialItem.trueStability,
+    trueDifficulty: initialItem.trueDifficulty,
     lastReviewedDay: null,
     dueDay: 0, // every item is introduced, and first becomes due, on day 0
     reviewCount: 0,
@@ -220,13 +194,10 @@ export function simulateLearnerDayLoop(options: {
         learnerId: learner.learnerId,
         cardId: run.cardId,
         trueStability: run.trueStability,
+        trueDifficulty: run.trueDifficulty,
         lastReviewedAt: null,
       },
       elapsedDays,
-      {
-        targetRetrievability: engineConfig.targetRetrievability,
-        responseTimeConstant: engineConfig.responseTimeConstant,
-      },
       run.rng,
     );
 
@@ -316,12 +287,13 @@ export function simulateLearnerDayLoop(options: {
       }
     }
 
-    run.trueStability = applyTrueStabilityUpdate(
-      run.trueStability,
+    const nextTrue = nextTrueMemoryState(
+      { trueStability: run.trueStability, trueDifficulty: run.trueDifficulty },
       generated.trueRetrievability,
       generated.correct,
-      engineConfig,
     );
+    run.trueStability = nextTrue.trueStability;
+    run.trueDifficulty = nextTrue.trueDifficulty;
 
     run.trace.push({
       day,
@@ -361,13 +333,10 @@ export function simulateLearnerDayLoop(options: {
         learnerId: learner.learnerId,
         cardId: run.cardId,
         trueStability: run.trueStability,
+        trueDifficulty: run.trueDifficulty,
         lastReviewedAt: null,
       },
       elapsedAtProbe,
-      {
-        targetRetrievability: engineConfig.targetRetrievability,
-        responseTimeConstant: engineConfig.responseTimeConstant,
-      },
       run.rng,
     );
 

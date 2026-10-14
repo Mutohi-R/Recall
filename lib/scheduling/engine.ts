@@ -12,6 +12,26 @@ import { updateResponseTimeStats } from './learner-stats';
 
 const MS_PER_DAY = 1000 * 60 * 60 * 24;
 
+// 3.7.8 leaves input validation out of the pseudocode; the engine still
+// refuses inputs that would silently corrupt stored state (a non-positive or
+// non-numeric response time would put NaN or infinity into the learner's
+// response-time statistics, and a review dated before the previous one would
+// give a negative elapsed time).
+function validateEvent(item: ItemState, event: ReviewEvent): void {
+  if (!Number.isFinite(event.responseTimeMs) || event.responseTimeMs <= 0) {
+    throw new RangeError('responseTimeMs must be a positive, finite number');
+  }
+  if (Number.isNaN(event.reviewedAt.getTime())) {
+    throw new RangeError('reviewedAt must be a valid date');
+  }
+  if (
+    item.lastReviewedAt &&
+    event.reviewedAt.getTime() < item.lastReviewedAt.getTime()
+  ) {
+    throw new RangeError('reviewedAt is earlier than the previous review');
+  }
+}
+
 export interface ReviewOutcome {
   updatedItem: ItemState;
   updatedLearner: LearnerState;
@@ -25,6 +45,8 @@ export function processReview(
   event: ReviewEvent,
   config: EngineConfig,
 ): ReviewOutcome {
+  validateEvent(item, event);
+
   // Step 1
   const elapsedDays = item.lastReviewedAt
     ? (event.reviewedAt.getTime() - item.lastReviewedAt.getTime()) / MS_PER_DAY
@@ -63,7 +85,6 @@ export function processReview(
   } else {
     // Step 5 - compute R̂, the retrievability implied by this review
     const rHat = estimateRetrievability(
-      true,
       event.responseTimeMs,
       learner.meanLogResponseTime,
       learner.stdLogResponseTime,

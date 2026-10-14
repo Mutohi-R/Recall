@@ -37,14 +37,16 @@ export interface EngineConfig {
   responseTimeConstant: number; // c — fitted in simulation
   minRetrievability: number; // R_min — fitted in simulation
   maxRetrievability: number; // R_max — fitted in simulation
-  incorrectRetrievability: number; // fixed R̂ for incorrect responses, must be < R_min
   stabilitySmoothing: number; // α, EMA weight, (0, 1]
   stabilityGrowthRate: number; // k — fitted in simulation
   lapseFactor: number; // λ, (0, 1)
-  stabilityFloor: number; // S_floor, in days
+  stabilityFloor: number; // S_floor, in days: the lowest value a lapse can reduce stability to
   stabilityMax: number; // S_max, in days
   minIntervalForCorrection: number; // Δt_min, in days
-  maxStabilityChangePerReview: number; // Δ_max
+  // Δ_max, as a proportion: one review may move stability to at most
+  // S·(1 + Δ_max) and at least S / (1 + Δ_max). Applied to the combined
+  // correction-and-growth result (3.7.4), not to the correction alone.
+  maxStabilityChangePerReview: number;
   coldStartItemReviews: number; // n_item, ≥ 2
   coldStartLearnerReviews: number; // n_rt
   defaultPriorStability: number; // S̄_default, used when a learner has no adaptive-path items yet

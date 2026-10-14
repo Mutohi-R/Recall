@@ -21,6 +21,8 @@ export function createInitialItemState(
 
 // Classic SM-2, correctness treated as quality 5 (correct) or 0 (incorrect) —
 // this is the cold-start fallback, so it deliberately ignores response time.
+// The E-Factor formula is applied after every review, failures included
+// (Wozniak's step 5); a failure also restarts the interval sequence (step 6).
 export function applySM2(state: ItemState, event: ReviewEvent): ItemState {
   const quality = event.correct ? 5 : 0;
 
@@ -59,9 +61,13 @@ export function applySM2(state: ItemState, event: ReviewEvent): ItemState {
   };
 }
 
+const MS_PER_DAY = 1000 * 60 * 60 * 24;
+
+// Whole days in milliseconds, the same way the adaptive path computes its due
+// time, so both paths agree regardless of the server's time zone.
 export function nextReviewDate(state: ItemState): Date {
   if (!state.lastReviewedAt) throw new Error('Item has not been reviewed yet');
-  const next = new Date(state.lastReviewedAt);
-  next.setDate(next.getDate() + state.intervalDays);
-  return next;
+  return new Date(
+    state.lastReviewedAt.getTime() + state.intervalDays * MS_PER_DAY,
+  );
 }

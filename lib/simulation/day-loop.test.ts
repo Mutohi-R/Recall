@@ -20,14 +20,13 @@ const config: EngineConfig = {
   responseTimeConstant: 0.05,
   minRetrievability: 0.3,
   maxRetrievability: 0.99,
-  incorrectRetrievability: 0.1,
   stabilitySmoothing: 0.3,
   stabilityGrowthRate: 0.1,
   lapseFactor: 0.5,
   stabilityFloor: 0.5,
   stabilityMax: 36500,
   minIntervalForCorrection: 0.5,
-  maxStabilityChangePerReview: 1000,
+  maxStabilityChangePerReview: 1000, // proportional: effectively uncapped
   coldStartItemReviews: 3,
   coldStartLearnerReviews: 10,
   defaultPriorStability: 2,
@@ -398,6 +397,19 @@ describe('simulateLearnerDayLoop (several items sharing one learner state)', () 
     expect(run('adaptive-default-prior').trace).toEqual(run('adaptive').trace);
   });
 
+  it('is deterministic: the same seeds give identical results for the full learner loop', () => {
+    const learner = createSyntheticLearner('l1', 'mismatched', createRng(29));
+    const run = () =>
+      simulateLearnerDayLoop({
+        learner,
+        items: buildItems(learner, 5, 9000),
+        policy: 'adaptive',
+        engineConfig: smallN,
+        dayLoopConfig: cfg,
+      });
+    expect(run()).toEqual(run());
+  });
+
   it('does not touch the shared learner state under the sm2-only policy', () => {
     const learner = createSyntheticLearner('l1', 'matched', createRng(25));
     const out = simulateLearnerDayLoop({
@@ -433,5 +445,40 @@ describe('simulateLearnerDayLoop (several items sharing one learner state)', () 
     expect(together.reviewCount).toBe(alone.reviewCount);
     expect(together.retentionCorrect).toBe(alone.retentionCorrect);
     expect(together.trace).toEqual(alone.trace);
+  });
+
+  // Regression test for the audit finding: the synthetic world used to take
+  // its growth and lapse constants from the configuration under test, so even
+  // SM-2's results changed when the adaptive parameters did. SM-2 never reads
+  // the EngineConfig, so with the world now fixed, two very different
+  // configurations must give it identical results.
+  it("gives SM-2 identical results under two very different engine configs (the world doesn't depend on the config)", () => {
+    const learner = createSyntheticLearner('l1', 'matched', createRng(41));
+    const items = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({
+        initialItem: createSyntheticItemState(
+          learner,
+          `c${i}`,
+          createRng(500 + i),
+        ),
+        rng: createRng(900 + i),
+      }));
+    const other: EngineConfig = {
+      ...config,
+      stabilityGrowthRate: 3,
+      lapseFactor: 0.9,
+      stabilityFloor: 19,
+      stabilityMax: 400,
+      responseTimeConstant: 0.15,
+    };
+    const run = (engineConfig: EngineConfig) =>
+      simulateLearnerDayLoop({
+        learner,
+        items: items(4),
+        policy: 'sm2-only',
+        engineConfig,
+        dayLoopConfig: DEFAULT_DAY_LOOP_CONFIG,
+      }).results;
+    expect(run(config)).toEqual(run(other));
   });
 });

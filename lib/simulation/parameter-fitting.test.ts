@@ -8,6 +8,7 @@ import {
   isValidCandidate,
   DEFAULT_SEARCH_RANGES,
   FIXED_ENGINE_PARAMS,
+  selectCandidate,
 } from './parameter-fitting';
 import type { EngineConfig } from '../scheduling/types';
 
@@ -19,14 +20,13 @@ const baseline: EngineConfig = {
   responseTimeConstant: 0.05,
   minRetrievability: 0.3,
   maxRetrievability: 0.99,
-  incorrectRetrievability: 0.1,
   stabilitySmoothing: 0.3,
   stabilityGrowthRate: 0.1,
   lapseFactor: 0.5,
   stabilityFloor: 0.5,
   stabilityMax: 36500,
   minIntervalForCorrection: 0.5,
-  maxStabilityChangePerReview: 1000,
+  maxStabilityChangePerReview: 1000, // proportional: effectively uncapped
   coldStartItemReviews: 3,
   coldStartLearnerReviews: 10,
   defaultPriorStability: 2,
@@ -64,12 +64,6 @@ describe('satisfiesBoundsConstraints', () => {
     ).toBe(false);
     expect(
       satisfiesBoundsConstraints({ ...baseline, maxRetrievability: 0.85 }),
-    ).toBe(false);
-  });
-
-  it('rejects incorrectRetrievability >= minRetrievability', () => {
-    expect(
-      satisfiesBoundsConstraints({ ...baseline, incorrectRetrievability: 0.3 }),
     ).toBe(false);
   });
 
@@ -121,6 +115,15 @@ describe('satisfiesBoundsConstraints', () => {
         ...baseline,
         stabilityFloor: 100,
         stabilityMax: 50,
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects maxStabilityChangePerReview <= 0', () => {
+    expect(
+      satisfiesBoundsConstraints({
+        ...baseline,
+        maxStabilityChangePerReview: 0,
       }),
     ).toBe(false);
   });
@@ -202,6 +205,22 @@ describe('satisfiesMonotonicity', () => {
     };
     expect(satisfiesMonotonicity(violating)).toBe(false);
   });
+
+  it('checks the multiplier after the proportional change cap, as the engine applies it', () => {
+    // The same falling multiplier (about 3.47 down to 1.99), but with a cap
+    // of 0.5 every value is held at 1.5: what the engine actually produces is
+    // flat, so it no longer decreases.
+    const cappedFlat: EngineConfig = {
+      ...baseline,
+      targetRetrievability: 0.9,
+      stabilitySmoothing: 0.01,
+      stabilityGrowthRate: 5,
+      minRetrievability: 0.5,
+      maxRetrievability: 0.8,
+      maxStabilityChangePerReview: 0.5,
+    };
+    expect(satisfiesMonotonicity(cappedFlat)).toBe(true);
+  });
 });
 
 describe('isValidCandidate', () => {
@@ -253,10 +272,6 @@ describe('sampleCandidate', () => {
         [candidate.minRetrievability, DEFAULT_SEARCH_RANGES.minRetrievability],
         [candidate.maxRetrievability, DEFAULT_SEARCH_RANGES.maxRetrievability],
         [
-          candidate.incorrectRetrievability,
-          DEFAULT_SEARCH_RANGES.incorrectRetrievability,
-        ],
-        [
           candidate.stabilitySmoothing,
           DEFAULT_SEARCH_RANGES.stabilitySmoothing,
         ],
@@ -301,5 +316,35 @@ describe('sampleCandidate', () => {
         DEFAULT_SEARCH_RANGES.coldStartLearnerReviews[1],
       );
     }
+  });
+});
+
+describe('selectCandidate', () => {
+  const stat = (
+    meanRetention: number,
+    convergenceRate: number,
+    meanReviews: number,
+  ) => ({ config: baseline, meanRetention, convergenceRate, meanReviews });
+
+  it('picks the cheapest candidate meeting both floors', () => {
+    const cheap = stat(0.8, 0.95, 10);
+    const pricey = stat(0.9, 0.99, 20);
+    const result = selectCandidate([pricey, cheap, stat(0.7, 1, 5)]);
+    expect(result.rule).toBe('both-floors');
+    expect(result.winner).toBe(cheap);
+  });
+
+  it('falls back to the highest convergence among retentive candidates when none meets both floors', () => {
+    const best = stat(0.8, 0.6, 30);
+    const tieButPricier = stat(0.85, 0.6, 40);
+    const result = selectCandidate([stat(0.8, 0.3, 5), tieButPricier, best]);
+    expect(result.rule).toBe('convergence-fallback');
+    expect(result.winner).toBe(best);
+  });
+
+  it('returns no winner when nothing meets the retention floor', () => {
+    const result = selectCandidate([stat(0.5, 1, 5)]);
+    expect(result.rule).toBe('none');
+    expect(result.winner).toBeNull();
   });
 });

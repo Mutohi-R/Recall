@@ -8,14 +8,13 @@ const config: EngineConfig = {
   responseTimeConstant: 0.05,
   minRetrievability: 0.3,
   maxRetrievability: 0.99,
-  incorrectRetrievability: 0.1,
   stabilitySmoothing: 0.3,
   stabilityGrowthRate: 0.1,
   lapseFactor: 0.5,
   stabilityFloor: 0.5,
   stabilityMax: 1000,
   minIntervalForCorrection: 1,
-  maxStabilityChangePerReview: 100,
+  maxStabilityChangePerReview: 100, // proportional: effectively uncapped here
   coldStartItemReviews: 2, // small, so tests don't need many reviews
   coldStartLearnerReviews: 10,
   defaultPriorStability: 4,
@@ -141,9 +140,12 @@ describe('processReview', () => {
       config,
     );
     expect(result.updatedItem.stability).toBe(
-      Math.max(
-        config.stabilityFloor,
-        config.lapseFactor * stabilityBeforeLapse,
+      Math.min(
+        stabilityBeforeLapse,
+        Math.max(
+          config.stabilityFloor,
+          config.lapseFactor * stabilityBeforeLapse,
+        ),
       ),
     );
   });
@@ -165,5 +167,83 @@ describe('processReview', () => {
       config,
     );
     expect(incorrectResult.updatedLearner.rtCount).toBe(0);
+  });
+
+  it('rejects a response time that is zero, negative or not a number', () => {
+    const item = createInitialItemState('l1', 'c1');
+    for (const bad of [0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() =>
+        processReview(
+          item,
+          emptyLearner,
+          event(true, new Date('2026-01-01'), bad),
+          config,
+        ),
+      ).toThrow(RangeError);
+    }
+  });
+
+  it('rejects a review dated before the previous one', () => {
+    const item = {
+      ...createInitialItemState('l1', 'c1'),
+      lastReviewedAt: new Date('2026-01-05'),
+    };
+    expect(() =>
+      processReview(
+        item,
+        emptyLearner,
+        event(true, new Date('2026-01-04')),
+        config,
+      ),
+    ).toThrow(RangeError);
+  });
+
+  // Regression test for the audit finding: with the old day-based cap on the
+  // correction step alone, a mature item answered slowly earned a LONGER next
+  // interval than one answered at typical speed. These values are the
+  // configuration that exposed it, with the cap now read as a proportion.
+  it('never gives a slower correct answer a longer next interval, at any stability', () => {
+    const exposed: EngineConfig = {
+      ...config,
+      responseTimeConstant: 0.0819,
+      minRetrievability: 0.7458,
+      maxRetrievability: 0.9562,
+      stabilitySmoothing: 0.4523,
+      stabilityGrowthRate: 0.5757,
+      minIntervalForCorrection: 0.9831,
+      maxStabilityChangePerReview: 0.5,
+      stabilityMax: 36500,
+    };
+    const learner: LearnerState = {
+      ...emptyLearner,
+      meanLogResponseTime: Math.log(3),
+      stdLogResponseTime: 0.4,
+      rtCount: 100,
+    };
+    const DAY = 24 * 60 * 60 * 1000;
+    for (const stability of [5, 20, 100, 500, 5000]) {
+      const last = new Date('2026-01-01');
+      const onTime = new Date(last.getTime() - stability * Math.log(0.9) * DAY);
+      const intervals = [-2, -1, 0, 1, 2].map((z) => {
+        const item = {
+          ...createInitialItemState('l1', 'c1'),
+          stability,
+          reviewCount: 5,
+          lastReviewedAt: last,
+        };
+        const rt = Math.exp(Math.log(3) + 0.4 * z) * 1000;
+        const out = processReview(
+          item,
+          learner,
+          event(true, onTime, rt),
+          exposed,
+        );
+        return out.nextReviewAt.getTime() - onTime.getTime();
+      });
+      // ordered fastest (z = -2) to slowest (z = +2): never increasing
+      for (let i = 1; i < intervals.length; i++) {
+        expect(intervals[i]).toBeLessThanOrEqual(intervals[i - 1] + 1e-6);
+      }
+    }
   });
 });

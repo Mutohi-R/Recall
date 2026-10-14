@@ -1,55 +1,35 @@
 /**
- * Task 7 (Week 2): theta sweep, per 3.9.1's instruction that "Design
- * parameters such as theta will be evaluated separately across their
- * specified ranges rather than treated as fitted quantities" - this is why
- * theta is the one row of 3.7.7's table excluded from parameter-fitting.ts's
- * search (see FIXED_ENGINE_PARAMS there). 3.7.2 confirms the reason: theta
- * "can also be varied to examine how retention and review count respond to
- * different levels."
+ * Theta sweep, per 3.9.1's instruction that "Design parameters such as theta
+ * will be evaluated separately across their specified ranges rather than
+ * treated as fitted quantities" (and 3.7.2: theta "can also be varied to
+ * examine how retention and review count respond to different levels").
  *
  * No section of the thesis gives numeric levels for theta - only the Anki
  * citation in 3.7.2 (0.9 is the deployed default; above 0.9 workload
- * "increases very quickly," "overwhelming about 0.97"). THETA_LEVELS below is
- * therefore a simulation-harness choice, the same way 3.9.1 treats the
- * convergence tolerance/consecutive-count/max-reviews as harness choices
- * "reported with the results" rather than thesis-specified numbers.
+ * "increases very quickly," "overwhelming about 0.97"). THETA_LEVELS is
+ * therefore a harness choice, reported with the results.
  *
- * For each level, all 13 other free parameters are refit from scratch: their
- * valid ranges and the monotonicity condition both depend on theta (3.7.7's
- * 0 < R_min < theta < R_max < 1 bound, and the ln(theta) term in M(Rhat)), so
- * the theta=0.9 config from fit-parameters.ts is not reused here. Each
- * selected config is then evaluated at that same theta on an evaluation set
- * independent from the fitting set, exactly as fit-parameters.ts and
- * run-simulation.ts already keep those two sets separate (3.9.1).
+ * For each level, all the other free parameters are refit from scratch with
+ * the same search and the same selection rule as fit-parameters.ts
+ * (selectCandidate in parameter-fitting.ts): their valid ranges and the
+ * monotonicity condition both depend on theta (3.7.7). Each selected config
+ * is then evaluated at that theta on an evaluation set independent of the
+ * fitting set (3.9.1).
  *
- * Two things surfaced while building this that changed it from a first draft
- * that just reused fit-parameters.ts's rule unmodified:
+ * The synthetic learners are the same at every level: their memory and their
+ * response times do not depend on theta or on any candidate's parameters
+ * (memory-model.ts, generate-review.ts). In particular, a typical response
+ * speed always corresponds to a true recall probability of 0.9, so at levels
+ * other than 0.9 the anchoring assumption of 3.7.3 holds only approximately,
+ * which is part of what the sweep shows.
  *
- * - fit-parameters.ts's rule (cheapest config among those with mean retention
- *   >= 0.75) was tuned around theta=0.9. Applied across a sweep, low theta
- *   levels can have NO candidate ever clear a fixed 0.75 floor, and this is a
- *   real structural fact, not noise: at theta=0.70, a 5000-candidate search
- *   found a best of 0.733 retention - the scheduler intentionally reviews
- *   only once true retrievability has decayed to theta, so a fixed floor set
- *   above the achievable ceiling at low theta will always come back empty
- *   there, which would blank out exactly the low-review-count end of the
- *   trade-off curve theta 3.7.2 wants shown. So this script reports BOTH: the
- *   floor-gated winner (same rule as fit-parameters.ts, may legitimately be
- *   "none" at some levels) and the best retention found unconditionally
- *   (no floor), so every level has trade-off data even when the floor isn't
- *   reachable. The unconditional table is not filtered or re-selected to
- *   avoid this - at high theta it can pick a config that reviews nearly
- *   every day (over 300 reviews/item across the 365-day study period) to
- *   push retention slightly higher, which is a real, correctly-computed
- *   result, not a bug: it is exactly the "retention can be raised
- *   arbitrarily by reviewing constantly" case 3.9.1 names as the reason
- *   retention and review count must be reported together. Rows past
- *   NEAR_DAILY_REVIEW_THRESHOLD are labelled in the output so the number
- *   isn't later read out of context as a realistic operating point.
- * - 300 valid candidates (fit-parameters.ts's target) was demonstrated to be
- *   too small a sample for either of those numbers to be stable: rerunning
- *   with a different candidate seed at 300 flipped which of theta=0.75/0.80
- *   "passed" the floor. VALID_CANDIDATES_TARGET is 2000 here instead.
+ * Besides the selected configuration, the sweep reports the highest-retention
+ * candidate found at each level, regardless of cost. That table can pick a
+ * configuration that reviews very often to push retention up; rows past
+ * NEAR_DAILY_REVIEW_THRESHOLD are flagged rather than excluded, since that is
+ * exactly the "retention can be raised arbitrarily by reviewing constantly"
+ * case 3.9.1 gives as the reason retention and review count are reported
+ * together.
  *
  * Usage: npx tsx scripts/theta-sweep.ts
  */
@@ -66,7 +46,12 @@ import {
 import {
   sampleCandidate,
   isValidCandidate,
+  selectCandidate,
   DEFAULT_SEARCH_RANGES,
+  RETENTION_FLOOR,
+  CONVERGENCE_FLOOR,
+  type CandidateStats,
+  type SelectionRule,
 } from '../lib/simulation/parameter-fitting';
 import type { EngineConfig } from '../lib/scheduling/types';
 
@@ -85,12 +70,9 @@ const FITTING_ITEMS_PER_LEARNER = 10;
 const EVAL_LEARNERS = 50;
 const EVAL_ITEMS_PER_LEARNER = 20;
 
-// Raised from fit-parameters.ts's 300 - see the file header. Measured at
-// roughly 4 minutes total for all six theta levels (two eval-set runs per
-// level on top of the fitting search itself).
+// Same as fit-parameters.ts, so the theta = 0.90 row reproduces its winner.
 const VALID_CANDIDATES_TARGET = 2000;
 const MAX_SAMPLE_ATTEMPTS = 200000;
-const RETENTION_FLOOR = 0.75;
 
 // Purely a reporting label, not a selection constraint: over the 365-day
 // study period, averaging more than this many reviews per item means
@@ -150,12 +132,6 @@ function buildItemSet(
   return set;
 }
 
-interface CandidateStats {
-  config: EngineConfig;
-  meanRetention: number;
-  meanReviews: number;
-}
-
 function evaluateOn(
   config: EngineConfig,
   learners: SweepLearner[],
@@ -180,18 +156,20 @@ function evaluateOn(
   const meanReviews =
     results.reduce((sum, r) => sum + r.reviewCount, 0) / results.length;
 
-  return { config, meanRetention, meanReviews };
+  const convergenceRate =
+    results.filter((r) => r.convergedAtReview !== null).length / results.length;
+
+  return { config, meanRetention, meanReviews, convergenceRate };
 }
 
 interface LevelResult {
   theta: number;
   sampledCount: number;
   validCount: number;
-  // Same rule as fit-parameters.ts: cheapest (fewest reviews) among
-  // candidates with mean retention >= RETENTION_FLOOR. Null when no valid
-  // candidate at this theta clears the floor - a real possible outcome, not
-  // an error (see file header).
+  // Same rule as fit-parameters.ts (selectCandidate). Null when no valid
+  // candidate at this theta meets the retention floor.
   floorWinner: CandidateStats | null;
+  rule: SelectionRule;
   floorEval: CandidateStats | null;
   // Unconditional: whichever valid candidate had the highest mean retention
   // on the fitting set, regardless of the floor. Always present as long as
@@ -205,6 +183,7 @@ function fitAtTheta(
   fittingSet: SweepLearner[],
 ): {
   floorWinner: CandidateStats | null;
+  rule: SelectionRule;
   bestRetention: CandidateStats | null;
   validCount: number;
   sampledCount: number;
@@ -217,8 +196,8 @@ function fitAtTheta(
   const candidateRng = createRng(CANDIDATE_SEED);
   let validCount = 0;
   let sampledCount = 0;
-  let floorWinner: CandidateStats | null = null;
   let bestRetention: CandidateStats | null = null;
+  const allStats: CandidateStats[] = [];
 
   while (
     validCount < VALID_CANDIDATES_TARGET &&
@@ -234,16 +213,13 @@ function fitAtTheta(
     validCount++;
 
     const stats = evaluateOn(candidate, fittingSet);
-
-    if (stats.meanRetention >= RETENTION_FLOOR) {
-      if (!floorWinner || stats.meanReviews < floorWinner.meanReviews)
-        floorWinner = stats;
-    }
+    allStats.push(stats);
     if (!bestRetention || stats.meanRetention > bestRetention.meanRetention)
       bestRetention = stats;
   }
 
-  return { floorWinner, bestRetention, validCount, sampledCount };
+  const { winner: floorWinner, rule } = selectCandidate(allStats);
+  return { floorWinner, rule, bestRetention, validCount, sampledCount };
 }
 
 function runSweep(): LevelResult[] {
@@ -261,10 +237,8 @@ function runSweep(): LevelResult[] {
   );
 
   return THETA_LEVELS.map((theta) => {
-    const { floorWinner, bestRetention, validCount, sampledCount } = fitAtTheta(
-      theta,
-      fittingSet,
-    );
+    const { floorWinner, rule, bestRetention, validCount, sampledCount } =
+      fitAtTheta(theta, fittingSet);
     const floorEval = floorWinner
       ? evaluateOn(floorWinner.config, evalSet)
       : null;
@@ -276,6 +250,7 @@ function runSweep(): LevelResult[] {
       sampledCount,
       validCount,
       floorWinner,
+      rule,
       floorEval,
       bestRetention,
       bestRetentionEval,
@@ -298,7 +273,8 @@ function formatRow(
     stats.meanRetention.toFixed(3).padEnd(16) +
     stats.meanReviews.toFixed(1).padEnd(14) +
     evalStats.meanRetention.toFixed(3).padEnd(16) +
-    evalStats.meanReviews.toFixed(1);
+    evalStats.meanReviews.toFixed(1).padEnd(14) +
+    `${(stats.convergenceRate * 100).toFixed(0)}% / ${(evalStats.convergenceRate * 100).toFixed(0)}%`;
   const nearDaily =
     stats.meanReviews > NEAR_DAILY_REVIEW_THRESHOLD ||
     evalStats.meanReviews > NEAR_DAILY_REVIEW_THRESHOLD;
@@ -321,10 +297,12 @@ function report(levels: LevelResult[]): void {
     'fit retention'.padEnd(16) +
     'fit reviews'.padEnd(14) +
     'eval retention'.padEnd(16) +
-    'eval reviews';
+    'eval reviews'.padEnd(14) +
+    'converged fit/eval';
 
   console.log(
-    `Floor-gated selection (mean retention >= ${RETENTION_FLOOR}, cheapest reviews) - same rule as fit-parameters.ts:`,
+    `Selected configuration (same rule as fit-parameters.ts: retention >= ${RETENTION_FLOOR} and convergence >= ` +
+      `${CONVERGENCE_FLOOR * 100}%, cheapest; '*' = fallback rule, highest convergence among retention-floor candidates):`,
   );
   console.log(header);
   for (const {
@@ -333,9 +311,15 @@ function report(levels: LevelResult[]): void {
     validCount,
     floorWinner,
     floorEval,
+    rule,
   } of levels) {
     console.log(
-      formatRow(theta, `${validCount}/${sampledCount}`, floorWinner, floorEval),
+      formatRow(
+        theta,
+        `${validCount}/${sampledCount}${rule === 'convergence-fallback' ? ' *' : ''}`,
+        floorWinner,
+        floorEval,
+      ),
     );
   }
 

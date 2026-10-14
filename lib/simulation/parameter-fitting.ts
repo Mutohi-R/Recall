@@ -26,7 +26,6 @@ export interface SearchRanges {
   responseTimeConstant: [number, number];
   minRetrievability: [number, number];
   maxRetrievability: [number, number];
-  incorrectRetrievability: [number, number];
   stabilitySmoothing: [number, number];
   stabilityGrowthRate: [number, number];
   minIntervalForCorrection: [number, number];
@@ -39,39 +38,37 @@ export interface SearchRanges {
   defaultPriorStability: [number, number];
 }
 
+// Fixed before the FSRS-based synthetic world (memory-model.ts) was first
+// run, and not adjusted afterwards. Three ranges changed from the previous
+// harness, each for a stated reason rather than in response to results:
+//  - stabilityGrowthRate [0.01, 5]: the upper limit on k comes from 3.7.7's
+//    monotonicity condition, checked per candidate, so the range only needs to
+//    be wide enough not to bind before that condition does.
+//  - maxStabilityChangePerReview [0.1, 5]: now a proportion of the current
+//    stability (at most x6 or /6 in one review) rather than a number of days.
+//  - defaultPriorStability [1, 100]: items in the synthetic world start with
+//    an exponential stability of about 12-80 days (5th-95th percentile;
+//    median about 36), so the old [1, 10] range could not reach it.
 export const DEFAULT_SEARCH_RANGES: SearchRanges = {
   responseTimeConstant: [0.02, 0.2],
   minRetrievability: [0.5, 0.85],
   maxRetrievability: [0.92, 0.99],
-  incorrectRetrievability: [0.05, 0.5],
   stabilitySmoothing: [0.05, 0.9],
-  // Widened from an original [0.01, 0.3]: the first full search run kept
-  // placing its best candidates within a few percent of that ceiling
-  // (0.28-0.29), meaning the range itself - not the monotonicity
-  // constraint - was the binding limit. k's real ceiling still comes from
-  // 3.7.7's monotonicity condition (which depends on alpha and the R
-  // bounds), so widening the range just lets the search find where that
-  // numerically-checked limit actually falls instead of guessing it in
-  // advance.
-  stabilityGrowthRate: [0.01, 0.6],
-  // Below ~1 day, a lapse near the floor is followed by a forced next-day
-  // review at very low true retrievability (a "floor spiral" - see the
-  // fitting notes); above ~20 the floor would swallow the adaptive signal
-  // for most items. Widened slightly from [1, 15] alongside the other two
-  // changes here, since the first run's best candidates sat close to 15.
+  stabilityGrowthRate: [0.01, 5],
+  // Below ~1 day a lapse near the floor is followed by a forced next-day
+  // review; above ~20 the floor would swallow the adaptive signal for most
+  // items.
   stabilityFloor: [1, 20],
   // Keeps the Anki-cited 100-year figure (3.7.4) as an upper ceiling, while
   // letting the search pick a lower cap if that does better.
   stabilityMax: [365, 36500],
   minIntervalForCorrection: [0.1, 3],
-  maxStabilityChangePerReview: [1, 50],
-  // Widened from [0.2, 0.8]: the first run's best candidates sat at
-  // 0.77-0.79, against the same ceiling-effect as stabilityGrowthRate above.
+  maxStabilityChangePerReview: [0.1, 5],
   // Kept strictly below 1 per 3.7.7 (lambda in (0,1)).
   lapseFactor: [0.2, 0.95],
   coldStartItemReviews: [2, 8],
   coldStartLearnerReviews: [3, 30],
-  defaultPriorStability: [1, 10],
+  defaultPriorStability: [1, 100],
 };
 
 function uniform(rng: Rng, [min, max]: [number, number]): number {
@@ -94,7 +91,6 @@ export function sampleCandidate(
     responseTimeConstant: uniform(rng, ranges.responseTimeConstant),
     minRetrievability: uniform(rng, ranges.minRetrievability),
     maxRetrievability: uniform(rng, ranges.maxRetrievability),
-    incorrectRetrievability: uniform(rng, ranges.incorrectRetrievability),
     stabilitySmoothing: uniform(rng, ranges.stabilitySmoothing),
     stabilityGrowthRate: uniform(rng, ranges.stabilityGrowthRate),
     minIntervalForCorrection: uniform(rng, ranges.minIntervalForCorrection),
@@ -117,7 +113,6 @@ export function satisfiesBoundsConstraints(config: EngineConfig): boolean {
     minRetrievability,
     maxRetrievability,
     targetRetrievability,
-    incorrectRetrievability,
     stabilitySmoothing,
     lapseFactor,
     stabilityGrowthRate,
@@ -129,12 +124,12 @@ export function satisfiesBoundsConstraints(config: EngineConfig): boolean {
     return false;
   if (!(maxRetrievability < 1 && maxRetrievability > targetRetrievability))
     return false;
-  if (!(incorrectRetrievability < minRetrievability)) return false;
   if (!(stabilitySmoothing > 0 && stabilitySmoothing <= 1)) return false;
   if (!(lapseFactor > 0 && lapseFactor < 1)) return false;
   if (!(stabilityGrowthRate > 0)) return false;
   if (!(stabilityFloor > 0)) return false;
   if (!(stabilityMax > stabilityFloor)) return false;
+  if (!(config.maxStabilityChangePerReview > 0)) return false;
   if (!(config.defaultPriorStability > 0)) return false;
   if (
     !(
@@ -166,12 +161,17 @@ export function satisfiesBoundsConstraints(config: EngineConfig): boolean {
 //
 //   M(rHat) = [(1 - alpha) + alpha * ln(theta) / ln(rHat)] * (1 + k * (1 - rHat))
 //
-// The condition is that M is non-decreasing as rHat increases across the
-// allowed range [minRetrievability, maxRetrievability]. It depends only on
-// targetRetrievability, stabilitySmoothing (alpha), stabilityGrowthRate (k)
-// and the R bounds - not on stability, elapsed time, or the clamp - which is
-// why 3.7.7 says the limit "cannot be expressed as a fixed threshold" on k
-// alone but must be checked numerically per candidate.
+// The per-review change cap is proportional and applies to the combined
+// result (stability.ts), so the actual multiplier for an on-time review is
+// clamp(M(rHat), 1/(1+Δmax), 1+Δmax). That is what is checked below. Because
+// both M and the cap are proportions, the check still does not depend on
+// stability or elapsed time, which is why 3.7.7 can state it per candidate
+// rather than per item. (Under the earlier day-based cap on the correction
+// alone, no such stability-free check existed, and the condition failed for
+// mature items even though the closed-form M passed.)
+//
+// The condition is that the capped multiplier is non-decreasing as rHat
+// increases across the allowed range [minRetrievability, maxRetrievability].
 const R_HAT_SAMPLES = 200;
 
 export function computeMonotonicityMultiplier(
@@ -191,14 +191,20 @@ export function computeMonotonicityMultiplier(
 }
 
 export function satisfiesMonotonicity(config: EngineConfig): boolean {
-  const { minRetrievability, maxRetrievability } = config;
+  const { minRetrievability, maxRetrievability, maxStabilityChangePerReview } =
+    config;
+  const lowerCap = 1 / (1 + maxStabilityChangePerReview);
+  const upperCap = 1 + maxStabilityChangePerReview;
 
   let previousM = -Infinity;
   for (let i = 0; i < R_HAT_SAMPLES; i++) {
     const rHat =
       minRetrievability +
       ((maxRetrievability - minRetrievability) * i) / (R_HAT_SAMPLES - 1);
-    const m = computeMonotonicityMultiplier(rHat, config);
+    const m = Math.min(
+      upperCap,
+      Math.max(lowerCap, computeMonotonicityMultiplier(rHat, config)),
+    );
     if (m < previousM - 1e-9) return false; // a decrease - violates monotonicity
     previousM = m;
   }
@@ -207,4 +213,59 @@ export function satisfiesMonotonicity(config: EngineConfig): boolean {
 
 export function isValidCandidate(config: EngineConfig): boolean {
   return satisfiesBoundsConstraints(config) && satisfiesMonotonicity(config);
+}
+
+// ---------------------------------------------------------------------------
+// Selection rule, shared by scripts/fit-parameters.ts and scripts/theta-sweep.ts
+// so the two can never disagree.
+//
+// Among valid candidates, keep those whose mean retention at the held-out
+// test point is >= RETENTION_FLOOR and whose convergence rate is >=
+// CONVERGENCE_FLOOR, and pick the one with the fewest reviews per item.
+// 3.9.1 asks for retention, review count and convergence to be reported
+// together, so the rule looks at all three. The fallback was fixed before the
+// current synthetic world was first run: if no candidate meets both floors,
+// take the candidate with the highest convergence among those meeting the
+// retention floor (fewer reviews breaks a tie), and report that the
+// convergence floor was not met.
+
+export const RETENTION_FLOOR = 0.75;
+export const CONVERGENCE_FLOOR = 0.9;
+
+export interface CandidateStats {
+  config: EngineConfig;
+  meanRetention: number;
+  meanReviews: number;
+  convergenceRate: number; // share of items meeting the 3.9.1 convergence criterion
+}
+
+export type SelectionRule = 'both-floors' | 'convergence-fallback' | 'none';
+
+export function selectCandidate(stats: CandidateStats[]): {
+  winner: CandidateStats | null;
+  rule: SelectionRule;
+} {
+  const retentive = stats.filter((s) => s.meanRetention >= RETENTION_FLOOR);
+  const both = retentive.filter((s) => s.convergenceRate >= CONVERGENCE_FLOOR);
+  if (both.length > 0) {
+    return {
+      winner: both.reduce((best, s) =>
+        s.meanReviews < best.meanReviews ? s : best,
+      ),
+      rule: 'both-floors',
+    };
+  }
+  if (retentive.length > 0) {
+    return {
+      winner: retentive.reduce((best, s) =>
+        s.convergenceRate > best.convergenceRate ||
+        (s.convergenceRate === best.convergenceRate &&
+          s.meanReviews < best.meanReviews)
+          ? s
+          : best,
+      ),
+      rule: 'convergence-fallback',
+    };
+  }
+  return { winner: null, rule: 'none' };
 }

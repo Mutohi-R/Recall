@@ -3,8 +3,10 @@
 
 export type GenerativeCondition = 'matched' | 'mismatched';
 
-// FSRS's own power-law form — the specific curve your thesis cites as the reason
-// the exponential model may not hold (FSRS v4+).
+// FSRS's power-law form. FSRS moved from an exponential curve to a power law
+// at version 4 (the reason 3.7.1 and 3.9.1 give for testing a mismatched
+// shape); the decay of -0.5 used here is the one from FSRS-4.5 and FSRS-5
+// (version 4 itself used -1).
 //
 // CALIBRATION_THETA/POWER_LAW_DECAY fix the curve so it reaches
 // CALIBRATION_THETA at the *same elapsed time* the exponential does, rather

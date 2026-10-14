@@ -43,4 +43,17 @@ describe('SM-2 fallback', () => {
     state = applySM2(state, review(true, new Date('2026-01-01')));
     expect(nextReviewDate(state).toISOString().slice(0, 10)).toBe('2026-01-02');
   });
+
+  // Wozniak's description is ambiguous about the E-Factor on a failure (step 5
+  // updates it after every repetition; step 6 restarts "without changing the
+  // E-Factor"). This implementation applies the step 5 formula to every grade,
+  // with correct = 5 and incorrect = 0, so a correct answer adds 0.1 and a
+  // failure subtracts 0.8 (down to the 1.3 floor).
+  it('applies the E-Factor formula to every grade: +0.1 when correct, -0.8 on a failure', () => {
+    let state = createInitialItemState('l1', 'c1');
+    state = applySM2(state, review(true));
+    expect(state.easinessFactor).toBeCloseTo(2.6, 10);
+    state = applySM2(state, review(false));
+    expect(state.easinessFactor).toBeCloseTo(1.8, 10);
+  });
 });

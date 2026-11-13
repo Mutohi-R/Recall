@@ -4,7 +4,7 @@ export default defineNuxtConfig({
   devtools: { enabled: true },
   runtimeConfig: {
     supabaseUrl: process.env.NUXT_SUPABASE_URL,
-    supabaseKey: process.env.NUXT_SUPABASE_PUBLISHABLE_KEY,
+    supabasePublishableKey: process.env.NUXT_SUPABASE_PUBLISHABLE_KEY,
     supabaseSecretKey: process.env.NUXT_SUPABASE_SECRET_KEY,
   },
 });

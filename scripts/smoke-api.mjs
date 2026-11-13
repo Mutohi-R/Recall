@@ -56,6 +56,11 @@ const auth = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
   body: JSON.stringify({ email, password }),
 });
 const authJson = await auth.json();
+const serverDate = auth.headers.get('date');
+if (serverDate)
+  console.log(
+    `      clock offset vs Supabase: ${Date.now() - Date.parse(serverDate)} ms (negative = your clock is behind)`,
+  );
 check('sign in', auth.ok && !!authJson.access_token, auth.ok ? '' : (authJson.msg ?? authJson.error_description ?? auth.status));
 if (!authJson.access_token) process.exit(1);
 const token = authJson.access_token;
@@ -75,7 +80,11 @@ if (!card.json?.id) process.exit(1);
 // 4. The new card should be due straight away.
 const queue1 = await call('GET', '/api/queue?limit=50', token);
 const entry = Array.isArray(queue1.json) ? queue1.json.find((q) => q.card.id === card.json.id) : null;
-check('new card is in the queue', !!entry, `status ${queue1.status}`);
+check(
+  'new card is in the queue',
+  !!entry,
+  `status ${queue1.status}, ${Array.isArray(queue1.json) ? queue1.json.length + ' entries' : 'not a list'}`,
+);
 if (!entry) process.exit(1);
 
 // 5. Submit a review.

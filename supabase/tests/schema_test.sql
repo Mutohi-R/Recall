@@ -23,7 +23,7 @@ do $$ declare s public.item_states; begin
   select * into s from public.item_states;
   assert s.learner_id = '00000000-0000-0000-0000-00000000000a', 'item state owned by deck owner';
   assert s.review_count = 0 and s.stability is null and s.sm2_easiness = 2.5, 'cold-start defaults';
-  assert s.due_at <= now(), 'new card is due now';
+  assert s.due_at <= now() - interval '30 seconds', 'new card is already due, with margin for clock differences';
 end $$;
 
 -- ---- Alice cannot forge scheduling state or call record_review

@@ -47,6 +47,8 @@ export async function listDecks(
   const { data, error } = await client
     .from('decks')
     .select('id, name, created_at, cards(count)')
+    .is('archived_at', null)
+    .is('cards.archived_at', null)
     .order('created_at', { ascending: true });
   if (error) fail(error);
   return (data ?? []).map((d: any) => ({
@@ -85,6 +87,7 @@ export async function renameDeck(
     .from('decks')
     .update({ name })
     .eq('id', deckId)
+    .is('archived_at', null)
     .select('id');
   if (error) fail(error);
   if (!data || data.length === 0) throw new NotFoundError();
@@ -116,6 +119,7 @@ export async function listCards(
     .from('cards')
     .select('id, deck_id, front, back, created_at')
     .eq('deck_id', deckId)
+    .is('archived_at', null)
     .order('created_at', { ascending: true });
   if (error) fail(error);
   return (data ?? []).map(cardFromRow);
@@ -145,13 +149,49 @@ export async function updateCard(
     .from('cards')
     .update(changes)
     .eq('id', cardId)
+    .is('archived_at', null)
     .select('id');
   if (error) fail(error);
   if (!data || data.length === 0) throw new NotFoundError();
 }
 
-// Items due now or earlier, oldest due first. A card is due from the moment it
-// is created (the card trigger gives it a due time of now).
+// Deleting a deck or card archives it: the row is hidden from every list and
+// from the queue, but it stays in the database so the learner's review logs
+// and item states are kept (3.8). Archiving a deck archives its cards too, in
+// a database trigger. A row that is already archived counts as not found.
+export async function archiveDeck(
+  client: SupabaseClient,
+  deckId: string,
+  now: Date,
+): Promise<void> {
+  const { data, error } = await client
+    .from('decks')
+    .update({ archived_at: now.toISOString() })
+    .eq('id', deckId)
+    .is('archived_at', null)
+    .select('id');
+  if (error) fail(error);
+  if (!data || data.length === 0) throw new NotFoundError();
+}
+
+export async function archiveCard(
+  client: SupabaseClient,
+  cardId: string,
+  now: Date,
+): Promise<void> {
+  const { data, error } = await client
+    .from('cards')
+    .update({ archived_at: now.toISOString() })
+    .eq('id', cardId)
+    .is('archived_at', null)
+    .select('id');
+  if (error) fail(error);
+  if (!data || data.length === 0) throw new NotFoundError();
+}
+
+// Items due now or earlier, oldest due first, leaving out archived cards. A
+// card is due from the moment it is created (the card trigger gives it a due
+// time just before now).
 export async function getQueue(
   client: SupabaseClient,
   now: Date,
@@ -160,6 +200,7 @@ export async function getQueue(
   const { data, error } = await client
     .from('item_states')
     .select('id, due_at, cards!inner(id, deck_id, front, back)')
+    .is('cards.archived_at', null)
     .lte('due_at', now.toISOString())
     .order('due_at', { ascending: true })
     .limit(limit);

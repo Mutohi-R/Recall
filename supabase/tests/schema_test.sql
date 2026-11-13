@@ -1,5 +1,6 @@
 -- Run on a scratch database after stub_supabase.sql and the migration:
 --   psql -v ON_ERROR_STOP=1 -f stub_supabase.sql -f ../migrations/*.sql -f schema_test.sql
+-- (the migrations are applied in file-name order)
 -- Each block raises an exception if an expectation fails.
 
 insert into auth.users (id, email) values
@@ -133,5 +134,45 @@ do $$ begin assert (select count(*) from public.review_logs) = 1, 'alice sees he
 select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000b', false);
 do $$ begin assert (select count(*) from public.review_logs) = 0, 'bob sees no logs'; end $$;
 reset role;
+
+-- ---- Archiving: nothing is deleted, cards follow their deck, no cards in an archived deck
+set role authenticated;
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000a', false);
+insert into public.cards (id, deck_id, front, back)
+  values ('20000000-0000-0000-0000-000000000002', '10000000-0000-0000-0000-000000000001', 'Q2', 'A2');
+
+update public.cards set archived_at = now() where id = '20000000-0000-0000-0000-000000000002';
+do $$ begin
+  assert (select archived_at from public.cards where id = '20000000-0000-0000-0000-000000000002') is not null,
+    'a card can be archived by its owner';
+  assert (select archived_at from public.cards where id = '20000000-0000-0000-0000-000000000001') is null,
+    'archiving one card leaves the others';
+end $$;
+
+update public.decks set archived_at = now() where id = '10000000-0000-0000-0000-000000000001';
+do $$ begin
+  assert (select count(*) from public.cards where archived_at is null) = 0, 'archiving a deck archives its cards';
+  assert (select count(*) from public.cards) = 2, 'archived cards still exist';
+  assert (select count(*) from public.item_states) = 2, 'scheduling records still exist';
+  begin
+    insert into public.cards (deck_id, front, back)
+      values ('10000000-0000-0000-0000-000000000001', 'late', 'late');
+    assert false, 'no new cards in an archived deck';
+  exception when insufficient_privilege then null; end;
+end $$;
+reset role;
+do $$ begin
+  assert (select count(*) from public.review_logs) = 1, 'review history is untouched by archiving';
+end $$;
+
+-- Bob cannot archive Alice's things
+set role authenticated;
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000b', false);
+update public.cards set archived_at = null;
+update public.decks set archived_at = null;
+reset role;
+do $$ begin
+  assert (select archived_at from public.decks) is not null, 'bob cannot touch alice''s deck';
+end $$;
 
 select 'schema tests passed' as result;

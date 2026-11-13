@@ -26,9 +26,10 @@ export function createSupabaseReviewStore(client: SupabaseClient): ReviewStore {
     async loadForReview(learnerId, itemStateId): Promise<ReviewContext | null> {
       const itemRes = await client
         .from('item_states')
-        .select(ITEM_COLUMNS)
+        .select(`${ITEM_COLUMNS}, cards!inner(archived_at)`)
         .eq('id', itemStateId)
         .eq('learner_id', learnerId)
+        .is('cards.archived_at', null) // an archived card cannot be reviewed
         .maybeSingle();
       if (itemRes.error) throw itemRes.error;
       if (!itemRes.data) return null;

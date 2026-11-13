@@ -1,12 +1,12 @@
 import type { EventHandlerRequest, H3Event } from 'h3';
 
 type Handler = (event: H3Event<EventHandlerRequest>) => unknown;
-type Method = 'GET' | 'POST' | 'PATCH';
+type Method = 'GET' | 'POST' | 'PATCH' | 'DELETE';
 
 // Defines one API route and the methods it offers. Any other method gets a
-// 405, so for example DELETE on a deck is refused outright: the application
-// provides no self-service deletion of study records (3.8). Errors from the
-// lower layers become the right HTTP status.
+// 405. DELETE is offered only on decks and cards, and there it archives the
+// row instead of removing it, so the study records built on it are kept (3.8).
+// Errors from the lower layers become the right HTTP status.
 export function defineApiRoute(handlers: Partial<Record<Method, Handler>>) {
   return defineEventHandler(async (event) => {
     const handler = handlers[event.method as Method];

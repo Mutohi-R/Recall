@@ -75,6 +75,13 @@ check('no token is refused (401)', (await call('GET', '/api/queue')).status === 
 const deck = await call('POST', '/api/decks', token, { name: 'Smoke test deck' });
 check('create deck (201)', deck.status === 201 && !!deck.json?.id, `status ${deck.status}`);
 if (!deck.json?.id) process.exit(1);
+check(
+  'deck has a colour from 0 to 11',
+  Number.isInteger(deck.json.colour) &&
+    deck.json.colour >= 0 &&
+    deck.json.colour <= 11,
+  `colour ${deck.json.colour}`,
+);
 
 const card = await call('POST', `/api/decks/${deck.json.id}/cards`, token, { front: '2 + 2', back: '4' });
 check('create card (201)', card.status === 201 && !!card.json?.id, `status ${card.status}`);

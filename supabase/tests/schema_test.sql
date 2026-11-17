@@ -175,4 +175,40 @@ do $$ begin
   assert (select archived_at from public.decks) is not null, 'bob cannot touch alice''s deck';
 end $$;
 
+
+-- ---- Deck colours: chosen by the database, cycling through twelve, fixed once set
+-- Alice already has one deck (Biology, archived above).
+set role authenticated;
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000a', false);
+insert into public.decks (id, learner_id, name, colour)
+  values ('10000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-00000000000a', 'Chemistry', 7);
+do $$ begin
+  assert (select colour from public.decks where name = 'Biology') = 0, 'first deck gets colour 0';
+  assert (select colour from public.decks where name = 'Chemistry') = 1,
+    'next deck gets the next index; a colour sent with the insert is ignored';
+end $$;
+
+insert into public.decks (learner_id, name)
+  select '00000000-0000-0000-0000-00000000000a', 'Deck ' || g from generate_series(3, 13) g;
+do $$ begin
+  assert (select colour from public.decks where name = 'Deck 12') = 11, 'twelfth deck gets colour 11';
+  assert (select colour from public.decks where name = 'Deck 13') = 0, 'the cycle wraps back to 0';
+  assert (select min(colour) from public.decks) = 0 and (select max(colour) from public.decks) = 11,
+    'every colour is inside the palette';
+end $$;
+
+update public.decks set colour = 9 where name = 'Chemistry';
+do $$ begin
+  assert (select colour from public.decks where name = 'Chemistry') = 1, 'the colour cannot be changed afterwards';
+end $$;
+
+-- Colours are counted per learner
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000b', false);
+insert into public.decks (learner_id, name)
+  values ('00000000-0000-0000-0000-00000000000b', 'Physics');
+do $$ begin
+  assert (select colour from public.decks where name = 'Physics') = 0, 'a new learner starts again at 0';
+end $$;
+reset role;
+
 select 'schema tests passed' as result;

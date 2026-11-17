@@ -8,6 +8,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 export interface DeckSummary {
   id: string;
   name: string;
+  colour: number;
   createdAt: string;
   cardCount: number;
 }
@@ -23,7 +24,7 @@ export interface CardRecord {
 export interface QueueEntry {
   itemStateId: string;
   dueAt: string;
-  card: { id: string; deckId: string; front: string; back: string };
+  card: { id: string; deckId: string; deckColour: number; front: string; back: string };
 }
 
 // Thrown when a row the caller asked for is missing or not theirs. The two
@@ -46,7 +47,7 @@ export async function listDecks(
 ): Promise<DeckSummary[]> {
   const { data, error } = await client
     .from('decks')
-    .select('id, name, created_at, cards(count)')
+    .select('id, name, colour, created_at, cards(count)')
     .is('archived_at', null)
     .is('cards.archived_at', null)
     .order('created_at', { ascending: true });
@@ -54,6 +55,7 @@ export async function listDecks(
   return (data ?? []).map((d: any) => ({
     id: d.id,
     name: d.name,
+    colour: d.colour,
     createdAt: d.created_at,
     cardCount: d.cards?.[0]?.count ?? 0,
   }));
@@ -67,12 +69,13 @@ export async function createDeck(
   const { data, error } = await client
     .from('decks')
     .insert({ learner_id: learnerId, name })
-    .select('id, name, created_at')
+    .select('id, name, colour, created_at')
     .single();
   if (error) fail(error);
   return {
     id: data!.id,
     name: data!.name,
+    colour: data!.colour,
     createdAt: data!.created_at,
     cardCount: 0,
   };
@@ -199,7 +202,7 @@ export async function getQueue(
 ): Promise<QueueEntry[]> {
   const { data, error } = await client
     .from('item_states')
-    .select('id, due_at, cards!inner(id, deck_id, front, back)')
+    .select('id, due_at, cards!inner(id, deck_id, front, back, decks!inner(colour))')
     .is('cards.archived_at', null)
     .lte('due_at', now.toISOString())
     .order('due_at', { ascending: true })
@@ -211,6 +214,7 @@ export async function getQueue(
     card: {
       id: r.cards.id,
       deckId: r.cards.deck_id,
+      deckColour: r.cards.decks.colour,
       front: r.cards.front,
       back: r.cards.back,
     },

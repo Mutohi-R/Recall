@@ -24,7 +24,8 @@ function requireText(value: unknown, field: string, max: number): string {
     throw new ValidationError(`${field} must be text`);
   }
   const trimmed = value.trim();
-  if (trimmed.length === 0) throw new ValidationError(`${field} must not be empty`);
+  if (trimmed.length === 0)
+    throw new ValidationError(`${field} must not be empty`);
   if (trimmed.length > max) {
     throw new ValidationError(`${field} must be at most ${max} characters`);
   }
@@ -35,7 +36,10 @@ export function requireDeckName(value: unknown): string {
   return requireText(value, 'name', MAX_DECK_NAME_LENGTH);
 }
 
-export function requireCardText(value: unknown, field: 'front' | 'back'): string {
+export function requireCardText(
+  value: unknown,
+  field: 'front' | 'back',
+): string {
   return requireText(value, field, MAX_CARD_TEXT_LENGTH);
 }
 
@@ -43,7 +47,9 @@ export function parseQueueLimit(value: unknown): number {
   if (value === undefined || value === '') return DEFAULT_QUEUE_LIMIT;
   const n = Number(value);
   if (!Number.isInteger(n) || n < 1 || n > MAX_QUEUE_LIMIT) {
-    throw new ValidationError(`limit must be a whole number from 1 to ${MAX_QUEUE_LIMIT}`);
+    throw new ValidationError(
+      `limit must be a whole number from 1 to ${MAX_QUEUE_LIMIT}`,
+    );
   }
   return n;
 }
@@ -51,6 +57,23 @@ export function parseQueueLimit(value: unknown): number {
 export function parseQueueDeck(value: unknown): string | undefined {
   if (value === undefined || value === '') return undefined;
   return requireUuid(value, 'deck');
+}
+
+export function parseTimeZone(value: unknown): string {
+  if (value === undefined || value === '') return 'UTC';
+  if (
+    typeof value !== 'string' ||
+    value.length > 64 ||
+    !/^[A-Za-z0-9_+\-/]+$/.test(value)
+  ) {
+    throw new ValidationError('tz must be a time zone name');
+  }
+  try {
+    new Intl.DateTimeFormat('en', { timeZone: value });
+  } catch {
+    throw new ValidationError('tz must be a time zone name');
+  }
+  return value;
 }
 
 export function requireObject(value: unknown): Record<string, unknown> {

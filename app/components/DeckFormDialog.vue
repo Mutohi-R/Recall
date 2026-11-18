@@ -4,6 +4,7 @@ import { Check, Plus } from "@lucide/vue"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import FormField from "@/components/FormField.vue"
+import Notice from "@/components/Notice.vue"
 import {
   Dialog,
   DialogClose,
@@ -65,13 +66,10 @@ function onSubmit() {
           {{ mode === "create" ? "Give the new deck a name." : "Change the name of this deck." }}
         </DialogDescription>
 
-        <FormField
-          v-slot="field"
-          label="Name"
-          :count="name.length"
-          :max="MAX_NAME"
-          :error="localError || serverError"
-        >
+        <!-- The server could not save the deck (Figma: New deck, save failed) -->
+        <Notice v-if="serverError" variant="error" :lines="[serverError]" />
+
+        <FormField v-slot="field" label="Name" :count="name.length" :max="MAX_NAME" :error="localError">
           <Input
             v-bind="field"
             v-model="name"

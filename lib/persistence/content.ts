@@ -1,4 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { ValidationError } from '../validation';
 
 export interface DeckSummary {
   id: string;
@@ -39,6 +40,8 @@ export class NotFoundError extends Error {
 
 function fail(error: { message: string; code?: string }): never {
   if (error.code === '42501') throw new NotFoundError();
+  if (error.code === '22023')
+    throw new ValidationError('tz is not a known time zone');
   throw error;
 }
 
@@ -248,4 +251,59 @@ export async function getQueue(
       back: r.cards.back,
     },
   }));
+}
+
+// ---------------------------------------------------------------- progress
+
+export interface ProgressDeck {
+  id: string;
+  name: string;
+  colour: number;
+  archived: boolean;
+}
+
+export interface ProgressActivity {
+  today: string;
+  totalReviews: number;
+  week: { reviews: number; recalled: number };
+  newCards: number;
+  daily: { day: string; deckId: string; count: number }[];
+  stages: { new: number; learning: number; young: number; mature: number };
+  // offset 0 is today and also holds every card that is overdue
+  due: { offset: number; deckId: string; count: number }[];
+  decks: ProgressDeck[];
+}
+
+export interface ProgressMemory {
+  cards: number;
+  adaptive: number;
+  mostReviews: number;
+  stability: { p25: number; median: number; p75: number } | null;
+  rtCount: number;
+  paceSeconds: number | null;
+  dailyTime: { day: string; seconds: number }[];
+  gaps: { n: number; days: number; count: number }[];
+}
+
+export interface Progress {
+  activity: ProgressActivity;
+  memory: ProgressMemory;
+}
+
+export async function getProgress(
+  client: SupabaseClient,
+  now: Date,
+  tz: string,
+): Promise<Progress> {
+  const args = { p_now: now.toISOString(), p_tz: tz };
+  const [activity, memory] = await Promise.all([
+    client.rpc('progress_activity', args),
+    client.rpc('progress_memory', args),
+  ]);
+  if (activity.error) fail(activity.error);
+  if (memory.error) fail(memory.error);
+  return {
+    activity: activity.data as ProgressActivity,
+    memory: memory.data as ProgressMemory,
+  };
 }

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { listCards } from './content';
+import { ValidationError } from '../validation';
+import { getProgress, listCards } from './content';
 
 function fakeClient(total: number, cap: number, deckExists = true) {
   const rows = Array.from({ length: total }, (_, i) => ({
@@ -90,5 +91,57 @@ describe('listCards', () => {
   it('throws not found when the deck is not there', async () => {
     const { client } = fakeClient(5, 1000, false);
     await expect(listCards(client, 'd1', 1000)).rejects.toThrow();
+  });
+});
+
+describe('getProgress', () => {
+  it('asks the database for both sets of numbers with the same time and zone', async () => {
+    const calls: [string, unknown][] = [];
+    const client = {
+      rpc: async (name: string, args: unknown) => {
+        calls.push([name, args]);
+        return { data: { from: name }, error: null };
+      },
+    } as unknown as SupabaseClient;
+    const now = new Date('2026-11-18T20:00:00Z');
+    const progress = await getProgress(client, now, 'Africa/Lagos');
+    expect(calls.map((c) => c[0]).sort()).toEqual([
+      'progress_activity',
+      'progress_memory',
+    ]);
+    for (const [, args] of calls) {
+      expect(args).toEqual({
+        p_now: '2026-11-18T20:00:00.000Z',
+        p_tz: 'Africa/Lagos',
+      });
+    }
+    expect(progress).toEqual({
+      activity: { from: 'progress_activity' },
+      memory: { from: 'progress_memory' },
+    });
+  });
+
+  it('turns an unknown time zone from the database into a validation error', async () => {
+    const client = {
+      rpc: async () => ({
+        data: null,
+        error: { message: 'unknown time zone', code: '22023' },
+      }),
+    } as unknown as SupabaseClient;
+    await expect(
+      getProgress(client, new Date(), 'Mars/Olympus'),
+    ).rejects.toBeInstanceOf(ValidationError);
+  });
+
+  it('passes any other database error on', async () => {
+    const client = {
+      rpc: async () => ({
+        data: null,
+        error: { message: 'boom', code: 'XX000' },
+      }),
+    } as unknown as SupabaseClient;
+    await expect(getProgress(client, new Date(), 'UTC')).rejects.toMatchObject({
+      message: 'boom',
+    });
   });
 });

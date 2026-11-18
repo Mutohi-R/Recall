@@ -6,6 +6,7 @@ import {
   requireCardText,
   parseQueueLimit,
   parseQueueDeck,
+  parseTimeZone,
   requireObject,
   MAX_DECK_NAME_LENGTH,
   MAX_CARD_TEXT_LENGTH,
@@ -65,6 +66,25 @@ describe('validation', () => {
     expect(requireObject({ a: 1 })).toEqual({ a: 1 });
     for (const bad of [null, undefined, 'x', 3, [1]]) {
       expect(() => requireObject(bad)).toThrow(ValidationError);
+    }
+  });
+
+  it('reads a time zone name and falls back to UTC', () => {
+    expect(parseTimeZone(undefined)).toBe('UTC');
+    expect(parseTimeZone('')).toBe('UTC');
+    expect(parseTimeZone('Africa/Lagos')).toBe('Africa/Lagos');
+    expect(parseTimeZone('America/Argentina/Buenos_Aires')).toBe(
+      'America/Argentina/Buenos_Aires',
+    );
+    for (const bad of [
+      'Mars/Olympus',
+      'x'.repeat(65),
+      "UTC'; drop table decks;--",
+      5,
+      null,
+      ['UTC'],
+    ]) {
+      expect(() => parseTimeZone(bad)).toThrow(ValidationError);
     }
   });
 });

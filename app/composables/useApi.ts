@@ -1,6 +1,7 @@
 import type {
   CardRecord,
   DeckSummary,
+  Progress,
   QueueEntry,
 } from '~~/lib/persistence/content';
 import type { ImportCard } from '~~/lib/import-cards';
@@ -61,7 +62,6 @@ export function useApi() {
       request<{ ok: true }>('PATCH', `/cards/${id}`, changes),
     deleteCard: (id: string) => request<{ ok: true }>('DELETE', `/cards/${id}`),
 
-    // The cards due now, oldest first. `deck` limits them to one deck.
     getQueue: (opts: { limit?: number; deck?: string } = {}) => {
       const query = new URLSearchParams();
       if (opts.limit) query.set('limit', String(opts.limit));
@@ -79,5 +79,9 @@ export function useApi() {
         '/reviews',
         review,
       ),
+
+    // `tz` is the learner's time zone, so days are counted on their own clock.
+    getProgress: (tz: string) =>
+      request<Progress>('GET', `/progress?tz=${encodeURIComponent(tz)}`),
   };
 }

@@ -241,4 +241,31 @@ do $$ begin
 end $$;
 reset role;
 
+-- ---- Several cards in one insert: all are saved, each with its own item state;
+-- one bad row saves none of them
+set role authenticated;
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000a', false);
+do $$
+declare
+  cards_before  integer := (select count(*) from public.cards);
+  states_before integer := (select count(*) from public.item_states);
+begin
+  insert into public.cards (deck_id, front, back) values
+    ('10000000-0000-0000-0000-000000000002', 'b1', 'a1'),
+    ('10000000-0000-0000-0000-000000000002', 'b2', 'a2'),
+    ('10000000-0000-0000-0000-000000000002', 'b3', 'a3');
+  assert (select count(*) from public.cards) = cards_before + 3, 'all three cards are saved';
+  assert (select count(*) from public.item_states) = states_before + 3, 'each new card gets its item state';
+
+  begin
+    insert into public.cards (deck_id, front, back) values
+      ('10000000-0000-0000-0000-000000000002', 'good', 'a'),
+      ('10000000-0000-0000-0000-000000000002', '   ', 'blank front');
+    assert false, 'a blank front must refuse the whole insert';
+  exception when check_violation then null; end;
+  assert (select count(*) from public.cards) = cards_before + 3, 'the refused insert saved no card';
+  assert (select count(*) from public.item_states) = states_before + 3, 'and made no item state';
+end $$;
+reset role;
+
 select 'schema tests passed' as result;

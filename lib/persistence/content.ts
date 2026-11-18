@@ -144,6 +144,24 @@ export async function createCard(
   return cardFromRow(data);
 }
 
+export async function createCards(
+  client: SupabaseClient,
+  deckId: string,
+  cards: { front: string; back: string }[],
+  now: Date = new Date(),
+): Promise<number> {
+  const start = now.getTime();
+  const rows = cards.map((c, i) => ({
+    deck_id: deckId,
+    front: c.front,
+    back: c.back,
+    created_at: new Date(start + i).toISOString(),
+  }));
+  const { data, error } = await client.from('cards').insert(rows).select('id');
+  if (error) fail(error);
+  return data?.length ?? 0;
+}
+
 export async function updateCard(
   client: SupabaseClient,
   cardId: string,

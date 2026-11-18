@@ -1,0 +1,21 @@
+<div id="boot" style="position:fixed;inset:0;background:#fbf8f1;font-family:'Bricolage Grotesque Variable','Bricolage Grotesque',system-ui,sans-serif;color:#1b1b1f">
+  <div style="height:88px;display:flex;align-items:center;padding:0 48px;font-size:24px;line-height:30px;font-weight:600">Recall</div>
+  <div id="boot-card" style="display:none;align-items:center;justify-content:center;height:calc(100% - 88px - 64px)">
+    <div style="box-sizing:border-box;width:440px;max-width:calc(100% - 32px);padding:36px;background:#fff;border:2px solid #1b1b1f;border-radius:4px;box-shadow:3px 3px 0 #1b1b1f;display:flex;flex-direction:column;gap:24px">
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <div style="font-size:32px;line-height:38px;font-weight:600">Signing you in</div>
+        <div style="font-size:16px;line-height:24px;color:#5e5e66">This takes a moment.</div>
+      </div>
+      <div style="box-sizing:border-box;height:8px;border:2px solid #1b1b1f;border-radius:4px;background:#ede7d8;overflow:hidden">
+        <div style="height:100%;width:40%;background:#3f63f2;animation:boot-slide 1.4s ease-in-out infinite"></div>
+      </div>
+    </div>
+  </div>
+  <style>
+    @keyframes boot-slide { from { translate: -100% 0 } to { translate: 250% 0 } }
+    @media (prefers-reduced-motion: reduce) { #boot-card div[style*="boot-slide"] { animation: none !important } }
+  </style>
+  <script>
+    if (location.pathname === '/auth/callback') document.getElementById('boot-card').style.display = 'flex'
+  </script>
+</div>

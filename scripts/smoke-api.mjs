@@ -213,6 +213,78 @@ check(
     .status === 404,
 );
 
+// 9b. Importing a list of cards adds all of them, in order, or none.
+const imported = await call('POST', `/api/decks/${deck.json.id}/cards/import`, token, {
+  cards: [
+    { front: 'import 1', back: 'one' },
+    { front: 'import 2', back: 'two' },
+    { front: 'import 3', back: 'three' },
+  ],
+});
+check(
+  'import three cards (201)',
+  imported.status === 201 && imported.json?.added === 3,
+  `status ${imported.status}, added ${imported.json?.added}`,
+);
+const cards2 = await call('GET', `/api/decks/${deck.json.id}/cards`, token);
+const importedFronts = Array.isArray(cards2.json)
+  ? cards2.json.map((c) => c.front).filter((f) => f.startsWith('import '))
+  : [];
+check(
+  'imported cards are listed in the order written',
+  importedFronts.join() === 'import 1,import 2,import 3',
+  importedFronts.join(),
+);
+const deckList4 = await call('GET', '/api/decks', token);
+const listed4 = Array.isArray(deckList4.json)
+  ? deckList4.json.find((d) => d.id === deck.json.id)
+  : null;
+check(
+  'deck now shows 5 cards, 4 due',
+  listed4?.cardCount === 5 && listed4?.dueCount === 4,
+  `cardCount ${listed4?.cardCount}, dueCount ${listed4?.dueCount}`,
+);
+const badImport = await call('POST', `/api/decks/${deck.json.id}/cards/import`, token, {
+  cards: [{ front: 'fine', back: 'fine' }, { front: 'no back' }],
+});
+check('a list with a bad card is refused (400)', badImport.status === 400, `status ${badImport.status}`);
+check(
+  'a refused import adds nothing',
+  (await call('GET', `/api/decks/${deck.json.id}/cards`, token)).json?.length === 5,
+);
+check(
+  'an empty list is refused (400)',
+  (await call('POST', `/api/decks/${deck.json.id}/cards/import`, token, { cards: [] })).status === 400,
+);
+check(
+  'a body without a list is refused (400)',
+  (await call('POST', `/api/decks/${deck.json.id}/cards/import`, token, { cards: 'x' })).status === 400,
+);
+check(
+  'more than 500 cards is refused (400)',
+  (
+    await call('POST', `/api/decks/${deck.json.id}/cards/import`, token, {
+      cards: Array.from({ length: 501 }, () => ({ front: 'a', back: 'b' })),
+    })
+  ).status === 400,
+);
+check(
+  'importing into a deck that is not yours is 404',
+  (
+    await call('POST', '/api/decks/00000000-0000-4000-8000-000000000000/cards/import', token, {
+      cards: [{ front: 'a', back: 'b' }],
+    })
+  ).status === 404,
+);
+check(
+  'import needs a token (401)',
+  (
+    await call('POST', `/api/decks/${deck.json.id}/cards/import`, undefined, {
+      cards: [{ front: 'a', back: 'b' }],
+    })
+  ).status === 401,
+);
+
 // 10. Deleting a deck archives it and every card in it.
 const delDeck = await call('DELETE', `/api/decks/${deck.json.id}`, token);
 check(

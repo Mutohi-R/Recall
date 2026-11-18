@@ -1,5 +1,5 @@
-
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,100..800;1,100..800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,200..800&display=swap');
 
 @import "tailwindcss";
 @import "tw-animate-css";
@@ -84,4 +84,9 @@
   body {
     @apply bg-background text-foreground;
   }
+}
+
+@keyframes indeterminate {
+  from { translate: -100% 0; }
+  to { translate: 250% 0; }
 }

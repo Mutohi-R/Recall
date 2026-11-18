@@ -1,6 +1,3 @@
-// Input checks shared by the API routes. Each returns the cleaned value or
-// throws ValidationError, which the routes report as a 400.
-
 export class ValidationError extends Error {
   constructor(message: string) {
     super(message);
@@ -49,6 +46,11 @@ export function parseQueueLimit(value: unknown): number {
     throw new ValidationError(`limit must be a whole number from 1 to ${MAX_QUEUE_LIMIT}`);
   }
   return n;
+}
+
+export function parseQueueDeck(value: unknown): string | undefined {
+  if (value === undefined || value === '') return undefined;
+  return requireUuid(value, 'deck');
 }
 
 export function requireObject(value: unknown): Record<string, unknown> {

@@ -1,64 +1,94 @@
 import { describe, it, expect } from 'vitest';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { createCards, NotFoundError } from './content';
+import { listCards } from './content';
 
-// A stand-in for the Supabase client that records what is inserted into cards.
-function fakeClient(result: { data?: unknown; error?: unknown }) {
-  const inserted: any[][] = [];
+function fakeClient(total: number, cap: number, deckExists = true) {
+  const rows = Array.from({ length: total }, (_, i) => ({
+    id: `c${String(i).padStart(5, '0')}`,
+    deck_id: 'd1',
+    front: `front ${i}`,
+    back: `back ${i}`,
+    created_at: new Date(2026, 10, 1, 0, 0, 0, i).toISOString(),
+  }));
+  const ranges: [number, number][] = [];
   const client = {
-    from: (table: string) => {
-      expect(table).toBe('cards');
-      return {
-        insert: (rows: any[]) => {
-          inserted.push(rows);
-          return { select: async () => result };
+    from(table: string) {
+      if (table === 'decks') {
+        const q: any = {
+          select: () => q,
+          eq: () => q,
+          maybeSingle: async () => ({
+            data: deckExists ? { id: 'd1' } : null,
+            error: null,
+          }),
+        };
+        return q;
+      }
+      const q: any = {
+        select: () => q,
+        eq: () => q,
+        is: () => q,
+        order: () => q,
+        range: async (from: number, to: number) => {
+          ranges.push([from, to]);
+          return {
+            data: rows.slice(from, Math.min(to + 1, from + cap)),
+            error: null,
+          };
         },
       };
+      return q;
     },
   } as unknown as SupabaseClient;
-  return { client, inserted };
+  return { client, ranges };
 }
 
-describe('createCards', () => {
-  it('inserts every card in one call, in order, and returns the count', async () => {
-    const { client, inserted } = fakeClient({
-      data: [{ id: 'a' }, { id: 'b' }, { id: 'c' }],
-    });
-    const now = new Date('2026-11-18T10:00:00.000Z');
-    const added = await createCards(
-      client,
-      'deck-1',
-      [
-        { front: 'Q1', back: 'A1' },
-        { front: 'Q2', back: 'A2' },
-        { front: 'Q3', back: 'A3' },
-      ],
-      now,
-    );
-    expect(added).toBe(3);
-    expect(inserted).toHaveLength(1);
-    expect(inserted[0].map((r) => r.front)).toEqual(['Q1', 'Q2', 'Q3']);
-    expect(inserted[0].every((r) => r.deck_id === 'deck-1')).toBe(true);
-    const times = inserted[0].map((r) => Date.parse(r.created_at));
-    expect(times).toEqual([times[0], times[0] + 1, times[0] + 2]);
-    expect(times[0]).toBe(now.getTime());
+describe('listCards', () => {
+  it('returns every card of a deck bigger than one page', async () => {
+    const { client, ranges } = fakeClient(2500, 1000);
+    const cards = await listCards(client, 'd1', 1000);
+    expect(cards).toHaveLength(2500);
+    expect(new Set(cards.map((c) => c.id)).size).toBe(2500);
+    expect(cards[0].front).toBe('front 0');
+    expect(cards[2499].front).toBe('front 2499');
+    expect(ranges).toEqual([
+      [0, 999],
+      [1000, 1999],
+      [2000, 2999],
+    ]);
   });
 
-  it('reports a refused insert (row-level policy) as not found', async () => {
-    const { client } = fakeClient({
-      error: { message: 'denied', code: '42501' },
-    });
-    await expect(
-      createCards(client, 'deck-1', [{ front: 'Q', back: 'A' }]),
-    ).rejects.toBeInstanceOf(NotFoundError);
+  it('asks once for a deck smaller than a page', async () => {
+    const { client, ranges } = fakeClient(3, 1000);
+    expect(await listCards(client, 'd1', 1000)).toHaveLength(3);
+    expect(ranges).toHaveLength(1);
   });
 
-  it('passes any other database error on', async () => {
-    const { client } = fakeClient({
-      error: { message: 'boom', code: '08006' },
+  it('makes one extra request when the last page is exactly full, and stops', async () => {
+    const { client, ranges } = fakeClient(2000, 1000);
+    expect(await listCards(client, 'd1', 1000)).toHaveLength(2000);
+    expect(ranges).toHaveLength(3);
+  });
+
+  it('returns an empty list for an empty deck', async () => {
+    const { client } = fakeClient(0, 1000);
+    expect(await listCards(client, 'd1', 1000)).toEqual([]);
+  });
+
+  it('maps rows to cards', async () => {
+    const { client } = fakeClient(1, 1000);
+    const [card] = await listCards(client, 'd1', 1000);
+    expect(card).toEqual({
+      id: 'c00000',
+      deckId: 'd1',
+      front: 'front 0',
+      back: 'back 0',
+      createdAt: new Date(2026, 10, 1, 0, 0, 0, 0).toISOString(),
     });
-    await expect(
-      createCards(client, 'deck-1', [{ front: 'Q', back: 'A' }]),
-    ).rejects.toMatchObject({ message: 'boom' });
+  });
+
+  it('throws not found when the deck is not there', async () => {
+    const { client } = fakeClient(5, 1000, false);
+    await expect(listCards(client, 'd1', 1000)).rejects.toThrow();
   });
 });

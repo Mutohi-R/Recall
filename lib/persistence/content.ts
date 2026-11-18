@@ -1,10 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 
-// Deck, card and queue access for a signed-in learner. The client passed in
-// carries the learner's own token and the publishable key, so Row Level
-// Security decides which rows are visible or writable (3.8); nothing here
-// filters by owner on its own account.
-
 export interface DeckSummary {
   id: string;
   name: string;
@@ -12,6 +7,7 @@ export interface DeckSummary {
   createdAt: string;
   cardCount: number;
   dueCount: number;
+  nextDueAt: string | null;
 }
 
 export interface CardRecord {
@@ -25,11 +21,15 @@ export interface CardRecord {
 export interface QueueEntry {
   itemStateId: string;
   dueAt: string;
-  card: { id: string; deckId: string; deckColour: number; front: string; back: string };
+  card: {
+    id: string;
+    deckId: string;
+    deckColour: number;
+    front: string;
+    back: string;
+  };
 }
 
-// Thrown when a row the caller asked for is missing or not theirs. The two
-// cases are deliberately indistinguishable.
 export class NotFoundError extends Error {
   constructor() {
     super('not found');
@@ -38,7 +38,6 @@ export class NotFoundError extends Error {
 }
 
 function fail(error: { message: string; code?: string }): never {
-  // 42501 is insufficient_privilege: a row-level policy refused the write.
   if (error.code === '42501') throw new NotFoundError();
   throw error;
 }
@@ -58,6 +57,7 @@ export async function listDecks(
     createdAt: d.created_at,
     cardCount: d.card_count,
     dueCount: d.due_count,
+    nextDueAt: d.next_due_at ?? null,
   }));
 }
 
@@ -79,6 +79,7 @@ export async function createDeck(
     createdAt: data!.created_at,
     cardCount: 0,
     dueCount: 0,
+    nextDueAt: null,
   };
 }
 
@@ -107,9 +108,12 @@ function cardFromRow(r: any): CardRecord {
   };
 }
 
+export const CARD_PAGE_SIZE = 1000;
+
 export async function listCards(
   client: SupabaseClient,
   deckId: string,
+  pageSize: number = CARD_PAGE_SIZE,
 ): Promise<CardRecord[]> {
   const deck = await client
     .from('decks')
@@ -119,14 +123,22 @@ export async function listCards(
   if (deck.error) fail(deck.error);
   if (!deck.data) throw new NotFoundError();
 
-  const { data, error } = await client
-    .from('cards')
-    .select('id, deck_id, front, back, created_at')
-    .eq('deck_id', deckId)
-    .is('archived_at', null)
-    .order('created_at', { ascending: true });
-  if (error) fail(error);
-  return (data ?? []).map(cardFromRow);
+  const cards: CardRecord[] = [];
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await client
+      .from('cards')
+      .select('id, deck_id, front, back, created_at')
+      .eq('deck_id', deckId)
+      .is('archived_at', null)
+      .order('created_at', { ascending: true })
+      .order('id', { ascending: true })
+      .range(from, from + pageSize - 1);
+    if (error) fail(error);
+    const page = data ?? [];
+    cards.push(...page.map(cardFromRow));
+    if (page.length < pageSize) break;
+  }
+  return cards;
 }
 
 export async function createCard(
@@ -177,10 +189,6 @@ export async function updateCard(
   if (!data || data.length === 0) throw new NotFoundError();
 }
 
-// Deleting a deck or card archives it: the row is hidden from every list and
-// from the queue, but it stays in the database so the learner's review logs
-// and item states are kept (3.8). Archiving a deck archives its cards too, in
-// a database trigger. A row that is already archived counts as not found.
 export async function archiveDeck(
   client: SupabaseClient,
   deckId: string,
@@ -211,19 +219,21 @@ export async function archiveCard(
   if (!data || data.length === 0) throw new NotFoundError();
 }
 
-// Items due now or earlier, oldest due first, leaving out archived cards. A
-// card is due from the moment it is created (the card trigger gives it a due
-// time just before now).
 export async function getQueue(
   client: SupabaseClient,
   now: Date,
   limit: number,
+  deckId?: string,
 ): Promise<QueueEntry[]> {
-  const { data, error } = await client
+  let query = client
     .from('item_states')
-    .select('id, due_at, cards!inner(id, deck_id, front, back, decks!inner(colour))')
+    .select(
+      'id, due_at, cards!inner(id, deck_id, front, back, decks!inner(colour))',
+    )
     .is('cards.archived_at', null)
-    .lte('due_at', now.toISOString())
+    .lte('due_at', now.toISOString());
+  if (deckId) query = query.eq('cards.deck_id', deckId);
+  const { data, error } = await query
     .order('due_at', { ascending: true })
     .limit(limit);
   if (error) fail(error);

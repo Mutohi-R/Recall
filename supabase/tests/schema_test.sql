@@ -233,6 +233,29 @@ do $$ declare r record; begin
   assert (select card_count from public.deck_summaries(now()) where name = 'Deck 3') = 0, 'an empty deck has 0 cards, 0 due';
 end $$;
 
+-- next_due_at: the soonest due time still ahead of the time asked about
+reset role;
+update public.item_states set due_at = now() + interval '2 days'
+  where card_id = '20000000-0000-0000-0000-000000000011';
+update public.item_states set due_at = now() + interval '5 days'
+  where card_id = '20000000-0000-0000-0000-000000000012';
+set role authenticated;
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000a', false);
+do $$ declare r record; begin
+  select * into r from public.deck_summaries(now()) where name = 'Chemistry';
+  assert r.due_count = 0, 'both cards now wait for a later time';
+  assert r.next_due_at between now() + interval '47 hours' and now() + interval '49 hours',
+    'next_due_at is the soonest of the two (2 days)';
+  select * into r from public.deck_summaries(now() + interval '3 days') where name = 'Chemistry';
+  assert r.due_count = 1, 'one card is due as of three days on';
+  assert r.next_due_at between now() + interval '119 hours' and now() + interval '121 hours',
+    'next_due_at moves on to the other card (5 days)';
+  select * into r from public.deck_summaries(now() + interval '6 days') where name = 'Chemistry';
+  assert r.due_count = 2 and r.next_due_at is null, 'nothing is waiting once both are due';
+  assert (select next_due_at from public.deck_summaries(now()) where name = 'Deck 3') is null,
+    'an empty deck has no next due time';
+end $$;
+
 -- Bob sees only his own decks
 select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000b', false);
 do $$ begin

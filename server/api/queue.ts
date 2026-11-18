@@ -1,11 +1,19 @@
 import { getQueue } from '../../lib/persistence/content';
-import { parseQueueLimit } from '../../lib/validation';
+import { parseQueueDeck, parseQueueLimit } from '../../lib/validation';
 
-// GET /api/queue?limit=20  ->  cards due now, oldest due first
+// GET /api/queue?limit=20&deck=<id>  ->  cards due now, oldest due first
+// (deck is optional: leave it out for every deck)
 export default defineApiRoute({
   GET: async (event) => {
     const learner = await requireLearner(event);
-    const limit = parseQueueLimit(getQuery(event).limit);
-    return getQueue(learnerClient(event, learner.token), new Date(), limit);
+    const query = getQuery(event);
+    const limit = parseQueueLimit(query.limit);
+    const deckId = parseQueueDeck(query.deck);
+    return getQueue(
+      learnerClient(event, learner.token),
+      new Date(),
+      limit,
+      deckId,
+    );
   },
 });

@@ -1,15 +1,3 @@
-// Walks one review through the running app, end to end.
-//
-//   1. start the app:   pnpm dev
-//   2. in another terminal:   node --env-file=.env scripts/smoke-api.mjs
-//
-// It asks for the email and password of the test account, signs in, then:
-// creates a deck and a card, checks the card is in the queue, submits a
-// review, checks the card has left the queue, and checks a repeat is refused.
-// It then deletes (archives) a card and the deck and checks that they vanish
-// from the lists and the queue and can no longer be reviewed.
-// The test deck is left archived in your project; the password is not written
-// anywhere.
 import readline from 'node:readline/promises';
 
 const SUPABASE_URL = process.env.NUXT_SUPABASE_URL;
@@ -24,7 +12,10 @@ if (!SUPABASE_URL || !PUBLISHABLE_KEY) {
 let email = process.env.SMOKE_EMAIL;
 let password = process.env.SMOKE_PASSWORD;
 if (!email || !password) {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
   email = (await rl.question('Test account email: ')).trim();
   password = await rl.question('Test account password (shown as you type): ');
   rl.close();
@@ -32,7 +23,9 @@ if (!email || !password) {
 
 let failed = 0;
 function check(label, ok, detail = '') {
-  console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}${detail ? '  ' + detail : ''}`);
+  console.log(
+    `${ok ? 'PASS' : 'FAIL'}  ${label}${detail ? '  ' + detail : ''}`,
+  );
   if (!ok) failed++;
 }
 
@@ -46,9 +39,13 @@ async function call(method, path, token, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   let json = null;
-  try { json = await res.json(); } catch { /* not JSON */ }
-    if (res.status >= 400)
-      console.log(`      server said: ${json?.statusMessage ?? res.status}`);
+  try {
+    json = await res.json();
+  } catch {
+    /* not JSON */
+  }
+  if (res.status >= 400)
+    console.log(`      server said: ${json?.statusMessage ?? res.status}`);
   return { status: res.status, json };
 }
 
@@ -64,16 +61,29 @@ if (serverDate)
   console.log(
     `      clock offset vs Supabase: ${Date.now() - Date.parse(serverDate)} ms (negative = your clock is behind)`,
   );
-check('sign in', auth.ok && !!authJson.access_token, auth.ok ? '' : (authJson.msg ?? authJson.error_description ?? auth.status));
+check(
+  'sign in',
+  auth.ok && !!authJson.access_token,
+  auth.ok ? '' : (authJson.msg ?? authJson.error_description ?? auth.status),
+);
 if (!authJson.access_token) process.exit(1);
 const token = authJson.access_token;
 
 // 2. The API must refuse a request with no token.
-check('no token is refused (401)', (await call('GET', '/api/queue')).status === 401);
+check(
+  'no token is refused (401)',
+  (await call('GET', '/api/queue')).status === 401,
+);
 
 // 3. Create a deck and a card.
-const deck = await call('POST', '/api/decks', token, { name: 'Smoke test deck' });
-check('create deck (201)', deck.status === 201 && !!deck.json?.id, `status ${deck.status}`);
+const deck = await call('POST', '/api/decks', token, {
+  name: 'Smoke test deck',
+});
+check(
+  'create deck (201)',
+  deck.status === 201 && !!deck.json?.id,
+  `status ${deck.status}`,
+);
 if (!deck.json?.id) process.exit(1);
 check(
   'deck has a colour from 0 to 11',
@@ -83,13 +93,22 @@ check(
   `colour ${deck.json.colour}`,
 );
 
-const card = await call('POST', `/api/decks/${deck.json.id}/cards`, token, { front: '2 + 2', back: '4' });
-check('create card (201)', card.status === 201 && !!card.json?.id, `status ${card.status}`);
+const card = await call('POST', `/api/decks/${deck.json.id}/cards`, token, {
+  front: '2 + 2',
+  back: '4',
+});
+check(
+  'create card (201)',
+  card.status === 201 && !!card.json?.id,
+  `status ${card.status}`,
+);
 if (!card.json?.id) process.exit(1);
 
 // 4. The new card should be due straight away.
 const queue1 = await call('GET', '/api/queue?limit=50', token);
-const entry = Array.isArray(queue1.json) ? queue1.json.find((q) => q.card.id === card.json.id) : null;
+const entry = Array.isArray(queue1.json)
+  ? queue1.json.find((q) => q.card.id === card.json.id)
+  : null;
 check(
   'new card is in the queue',
   !!entry,
@@ -97,29 +116,109 @@ check(
 );
 if (!entry) process.exit(1);
 
+// 4b. The queue can be limited to one deck.
+const other = await call('POST', '/api/decks', token, {
+  name: 'Smoke queue filter',
+});
+const otherCard = await call(
+  'POST',
+  `/api/decks/${other.json?.id}/cards`,
+  token,
+  { front: 'x', back: 'y' },
+);
+const queueThis = await call(
+  'GET',
+  `/api/queue?limit=50&deck=${deck.json.id}`,
+  token,
+);
+const queueOther = await call(
+  'GET',
+  `/api/queue?limit=50&deck=${other.json?.id}`,
+  token,
+);
+check(
+  "queue for one deck holds only that deck's cards",
+  Array.isArray(queueThis.json) &&
+    queueThis.json.length > 0 &&
+    queueThis.json.every((q) => q.card.deckId === deck.json.id) &&
+    Array.isArray(queueOther.json) &&
+    queueOther.json.length === 1 &&
+    queueOther.json[0].card.id === otherCard.json?.id,
+  `this ${queueThis.json?.length}, other ${queueOther.json?.length}`,
+);
+check(
+  'a bad deck id on the queue is refused (400)',
+  (await call('GET', '/api/queue?deck=nope', token)).status === 400,
+);
+await call('DELETE', `/api/decks/${other.json?.id}`, token);
+
 // 5. Submit a review.
 const review = await call('POST', '/api/reviews', token, {
-  itemStateId: entry.itemStateId, correct: true, responseTimeMs: 1500,
+  itemStateId: entry.itemStateId,
+  correct: true,
+  responseTimeMs: 1500,
 });
-check('submit review (200)', review.status === 200 && !!review.json?.nextReviewAt, `status ${review.status}`);
+check(
+  'submit review (200)',
+  review.status === 200 && !!review.json?.nextReviewAt,
+  `status ${review.status}`,
+);
 if (review.status === 200) {
   const days = review.json.intervalDays;
-  check('first review is scheduled 1 day out (SM-2 fallback)', Math.abs(days - 1) < 1e-9, `intervalDays ${days}`);
-  check('reply does not expose stability or path', !('stability' in review.json) && !('path' in review.json));
+  check(
+    'first review is scheduled 1 day out (SM-2 fallback)',
+    Math.abs(days - 1) < 1e-9,
+    `intervalDays ${days}`,
+  );
+  check(
+    'reply does not expose stability or path',
+    !('stability' in review.json) && !('path' in review.json),
+  );
 }
 
 // 6. The card should now be gone from the queue.
 const queue2 = await call('GET', '/api/queue?limit=50', token);
-check('card has left the queue', Array.isArray(queue2.json) && !queue2.json.some((q) => q.card.id === card.json.id));
+check(
+  'card has left the queue',
+  Array.isArray(queue2.json) &&
+    !queue2.json.some((q) => q.card.id === card.json.id),
+);
+
+// 6b. The deck now waits for the reviewed card, so it reports when that is.
+const afterReview = await call('GET', '/api/decks', token);
+const reviewedDeck = Array.isArray(afterReview.json)
+  ? afterReview.json.find((d) => d.id === deck.json.id)
+  : null;
+const hoursAhead = reviewedDeck?.nextDueAt
+  ? (Date.parse(reviewedDeck.nextDueAt) - Date.now()) / 3600000
+  : null;
+check(
+  'deck reports when its next card falls due (about a day on)',
+  hoursAhead !== null &&
+    hoursAhead > 23 &&
+    hoursAhead < 25 &&
+    reviewedDeck.dueCount === 0,
+  `nextDueAt ${reviewedDeck?.nextDueAt}, dueCount ${reviewedDeck?.dueCount}`,
+);
 
 // 7. Reviewing it again straight away must be refused (not due).
 const again = await call('POST', '/api/reviews', token, {
-  itemStateId: entry.itemStateId, correct: true, responseTimeMs: 1500,
+  itemStateId: entry.itemStateId,
+  correct: true,
+  responseTimeMs: 1500,
 });
-check('repeat review is refused (409)', again.status === 409, `status ${again.status}`);
+check(
+  'repeat review is refused (409)',
+  again.status === 409,
+  `status ${again.status}`,
+);
 
 // 8. Bad input and a forbidden method.
-const bad = await call('POST', '/api/reviews', token, { itemStateId: entry.itemStateId, correct: 'yes', responseTimeMs: 1500 });
+const bad = await call('POST', '/api/reviews', token, {
+  itemStateId: entry.itemStateId,
+  correct: 'yes',
+  responseTimeMs: 1500,
+});
 check('bad input is refused (400)', bad.status === 400, `status ${bad.status}`);
 check(
   'an unsupported method is refused (405)',
@@ -214,13 +313,18 @@ check(
 );
 
 // 9b. Importing a list of cards adds all of them, in order, or none.
-const imported = await call('POST', `/api/decks/${deck.json.id}/cards/import`, token, {
-  cards: [
-    { front: 'import 1', back: 'one' },
-    { front: 'import 2', back: 'two' },
-    { front: 'import 3', back: 'three' },
-  ],
-});
+const imported = await call(
+  'POST',
+  `/api/decks/${deck.json.id}/cards/import`,
+  token,
+  {
+    cards: [
+      { front: 'import 1', back: 'one' },
+      { front: 'import 2', back: 'two' },
+      { front: 'import 3', back: 'three' },
+    ],
+  },
+);
 check(
   'import three cards (201)',
   imported.status === 201 && imported.json?.added === 3,
@@ -244,21 +348,39 @@ check(
   listed4?.cardCount === 5 && listed4?.dueCount === 4,
   `cardCount ${listed4?.cardCount}, dueCount ${listed4?.dueCount}`,
 );
-const badImport = await call('POST', `/api/decks/${deck.json.id}/cards/import`, token, {
-  cards: [{ front: 'fine', back: 'fine' }, { front: 'no back' }],
-});
-check('a list with a bad card is refused (400)', badImport.status === 400, `status ${badImport.status}`);
+const badImport = await call(
+  'POST',
+  `/api/decks/${deck.json.id}/cards/import`,
+  token,
+  {
+    cards: [{ front: 'fine', back: 'fine' }, { front: 'no back' }],
+  },
+);
+check(
+  'a list with a bad card is refused (400)',
+  badImport.status === 400,
+  `status ${badImport.status}`,
+);
 check(
   'a refused import adds nothing',
-  (await call('GET', `/api/decks/${deck.json.id}/cards`, token)).json?.length === 5,
+  (await call('GET', `/api/decks/${deck.json.id}/cards`, token)).json
+    ?.length === 5,
 );
 check(
   'an empty list is refused (400)',
-  (await call('POST', `/api/decks/${deck.json.id}/cards/import`, token, { cards: [] })).status === 400,
+  (
+    await call('POST', `/api/decks/${deck.json.id}/cards/import`, token, {
+      cards: [],
+    })
+  ).status === 400,
 );
 check(
   'a body without a list is refused (400)',
-  (await call('POST', `/api/decks/${deck.json.id}/cards/import`, token, { cards: 'x' })).status === 400,
+  (
+    await call('POST', `/api/decks/${deck.json.id}/cards/import`, token, {
+      cards: 'x',
+    })
+  ).status === 400,
 );
 check(
   'more than 500 cards is refused (400)',
@@ -271,9 +393,14 @@ check(
 check(
   'importing into a deck that is not yours is 404',
   (
-    await call('POST', '/api/decks/00000000-0000-4000-8000-000000000000/cards/import', token, {
-      cards: [{ front: 'a', back: 'b' }],
-    })
+    await call(
+      'POST',
+      '/api/decks/00000000-0000-4000-8000-000000000000/cards/import',
+      token,
+      {
+        cards: [{ front: 'a', back: 'b' }],
+      },
+    )
   ).status === 404,
 );
 check(
@@ -318,5 +445,45 @@ check(
   (await call('DELETE', `/api/decks/${deck.json.id}`, token)).status === 404,
 );
 
-console.log(failed === 0 ? '\nAll checks passed.' : `\n${failed} check(s) failed.`);
+// 11. A deck bigger than the database's 1000-row answer limit lists in full.
+const big = await call('POST', '/api/decks', token, { name: 'Big deck' });
+for (let part = 0; part < 3; part++) {
+  const cards = Array.from({ length: 500 }, (_, i) => {
+    const n = part * 500 + i + 1;
+    return { front: `big ${n}`, back: `answer ${n}` };
+  });
+  await call('POST', `/api/decks/${big.json.id}/cards/import`, token, {
+    cards,
+  });
+}
+const bigList = await call('GET', `/api/decks/${big.json.id}/cards`, token);
+const bigFronts = Array.isArray(bigList.json)
+  ? bigList.json.map((c) => c.front)
+  : [];
+check(
+  'a 1500-card deck lists all 1500 cards',
+  bigFronts.length === 1500,
+  `got ${bigFronts.length}`,
+);
+check(
+  'no card is repeated across pages',
+  new Set(bigList.json?.map((c) => c.id)).size === 1500,
+);
+// Three imports sent one straight after the other can overlap in time, so the
+// check is on the order inside each import, which is what an import promises.
+const numbers = bigFronts.map((f) => Number(f.slice(4)));
+check(
+  'each import keeps its cards in the order written',
+  [0, 1, 2].every((part) => {
+    const mine = numbers.filter((n) => n > part * 500 && n <= part * 500 + 500);
+    return (
+      mine.length === 500 && mine.every((n, i) => i === 0 || n > mine[i - 1])
+    );
+  }),
+);
+await call('DELETE', `/api/decks/${big.json.id}`, token);
+
+console.log(
+  failed === 0 ? '\nAll checks passed.' : `\n${failed} check(s) failed.`,
+);
 process.exit(failed === 0 ? 0 : 1);

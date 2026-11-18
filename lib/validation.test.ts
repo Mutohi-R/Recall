@@ -5,6 +5,7 @@ import {
   requireDeckName,
   requireCardText,
   parseQueueLimit,
+  parseQueueDeck,
   requireObject,
   MAX_DECK_NAME_LENGTH,
   MAX_CARD_TEXT_LENGTH,
@@ -25,14 +26,30 @@ describe('validation', () => {
     expect(requireDeckName('  Biology ')).toBe('Biology');
     expect(() => requireDeckName('   ')).toThrow(ValidationError);
     expect(() => requireDeckName(42)).toThrow(ValidationError);
-    expect(requireDeckName('a'.repeat(MAX_DECK_NAME_LENGTH))).toHaveLength(MAX_DECK_NAME_LENGTH);
-    expect(() => requireDeckName('a'.repeat(MAX_DECK_NAME_LENGTH + 1))).toThrow(ValidationError);
+    expect(requireDeckName('a'.repeat(MAX_DECK_NAME_LENGTH))).toHaveLength(
+      MAX_DECK_NAME_LENGTH,
+    );
+    expect(() => requireDeckName('a'.repeat(MAX_DECK_NAME_LENGTH + 1))).toThrow(
+      ValidationError,
+    );
   });
 
   it('applies the same rules to card text', () => {
     expect(requireCardText(' Q ', 'front')).toBe('Q');
     expect(() => requireCardText('', 'back')).toThrow(ValidationError);
-    expect(() => requireCardText('a'.repeat(MAX_CARD_TEXT_LENGTH + 1), 'back')).toThrow(ValidationError);
+    expect(() =>
+      requireCardText('a'.repeat(MAX_CARD_TEXT_LENGTH + 1), 'back'),
+    ).toThrow(ValidationError);
+  });
+
+  it('reads the optional deck filter of the queue', () => {
+    const id = '10000000-0000-4000-8000-000000000001';
+    expect(parseQueueDeck(undefined)).toBeUndefined();
+    expect(parseQueueDeck('')).toBeUndefined();
+    expect(parseQueueDeck(id)).toBe(id);
+    for (const bad of ['nope', '123', ['a', 'b'], 5]) {
+      expect(() => parseQueueDeck(bad)).toThrow(ValidationError);
+    }
   });
 
   it('defaults the queue limit and bounds it', () => {

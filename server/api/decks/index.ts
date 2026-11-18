@@ -6,7 +6,7 @@ import { requireDeckName, requireObject } from '../../../lib/validation';
 export default defineApiRoute({
   GET: async (event) => {
     const learner = await requireLearner(event);
-    return listDecks(learnerClient(event, learner.token));
+    return listDecks(learnerClient(event, learner.token), new Date());
   },
   POST: async (event) => {
     const learner = await requireLearner(event);

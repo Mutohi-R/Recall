@@ -11,6 +11,7 @@ export interface DeckSummary {
   colour: number;
   createdAt: string;
   cardCount: number;
+  dueCount: number;
 }
 
 export interface CardRecord {
@@ -44,20 +45,19 @@ function fail(error: { message: string; code?: string }): never {
 
 export async function listDecks(
   client: SupabaseClient,
+  now: Date,
 ): Promise<DeckSummary[]> {
-  const { data, error } = await client
-    .from('decks')
-    .select('id, name, colour, created_at, cards(count)')
-    .is('archived_at', null)
-    .is('cards.archived_at', null)
-    .order('created_at', { ascending: true });
+  const { data, error } = await client.rpc('deck_summaries', {
+    p_now: now.toISOString(),
+  });
   if (error) fail(error);
   return (data ?? []).map((d: any) => ({
     id: d.id,
     name: d.name,
     colour: d.colour,
     createdAt: d.created_at,
-    cardCount: d.cards?.[0]?.count ?? 0,
+    cardCount: d.card_count,
+    dueCount: d.due_count,
   }));
 }
 
@@ -78,6 +78,7 @@ export async function createDeck(
     colour: data!.colour,
     createdAt: data!.created_at,
     cardCount: 0,
+    dueCount: 0,
   };
 }
 

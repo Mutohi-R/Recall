@@ -146,6 +146,11 @@ check(
   listed1?.cardCount === 3,
   `cardCount ${listed1?.cardCount}`,
 );
+check(
+  'deck shows 2 cards due',
+  listed1?.dueCount === 2,
+  `dueCount ${listed1?.dueCount}`,
+);
 
 const queue3 = await call('GET', '/api/queue?limit=50', token);
 const entry2 = Array.isArray(queue3.json)
@@ -180,6 +185,11 @@ check(
   'deck now shows 2 cards',
   listed2?.cardCount === 2,
   `cardCount ${listed2?.cardCount}`,
+);
+check(
+  'deck now shows 1 card due',
+  listed2?.dueCount === 1,
+  `dueCount ${listed2?.dueCount}`,
 );
 if (entry2) {
   const reviewArchived = await call('POST', '/api/reviews', token, {

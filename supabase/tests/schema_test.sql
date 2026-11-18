@@ -211,4 +211,34 @@ do $$ begin
 end $$;
 reset role;
 
+
+-- ---- Deck summaries: card and due counts per deck, archived rows left out
+-- Alice has decks Biology (archived) and Chemistry, Deck 3 to Deck 13 from above.
+set role authenticated;
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000a', false);
+insert into public.cards (id, deck_id, front, back) values
+  ('20000000-0000-0000-0000-000000000011', '10000000-0000-0000-0000-000000000002', 'c1', 'a1'),
+  ('20000000-0000-0000-0000-000000000012', '10000000-0000-0000-0000-000000000002', 'c2', 'a2'),
+  ('20000000-0000-0000-0000-000000000013', '10000000-0000-0000-0000-000000000002', 'c3', 'a3');
+update public.cards set archived_at = now() where id = '20000000-0000-0000-0000-000000000013';
+do $$ declare r record; begin
+  select * into r from public.deck_summaries(now()) where name = 'Chemistry';
+  assert r.card_count = 2, 'archived cards are not counted';
+  assert r.due_count = 2, 'new cards are due now';
+  assert r.colour = 1, 'summary carries the colour';
+  assert not exists (select 1 from public.deck_summaries(now()) where name = 'Biology'), 'archived decks are left out';
+  assert (select count(*) from public.deck_summaries(now())) = 12, 'twelve active decks';
+  select * into r from public.deck_summaries(now() - interval '1 day') where name = 'Chemistry';
+  assert r.due_count = 0, 'nothing is due as of yesterday';
+  assert (select card_count from public.deck_summaries(now()) where name = 'Deck 3') = 0, 'an empty deck has 0 cards, 0 due';
+end $$;
+
+-- Bob sees only his own decks
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-00000000000b', false);
+do $$ begin
+  assert (select count(*) from public.deck_summaries(now())) = 1, 'bob sees only his own deck';
+  assert (select name from public.deck_summaries(now())) = 'Physics';
+end $$;
+reset role;
+
 select 'schema tests passed' as result;

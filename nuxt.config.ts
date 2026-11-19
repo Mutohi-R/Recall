@@ -7,12 +7,12 @@ export default defineNuxtConfig({
   ssr: false,
   spaLoadingTemplate: true,
   runtimeConfig: {
-    supabaseUrl: process.env.NUXT_SUPABASE_URL,
-    supabasePublishableKey: process.env.NUXT_SUPABASE_PUBLISHABLE_KEY,
-    supabaseSecretKey: process.env.NUXT_SUPABASE_SECRET_KEY,
+    supabaseUrl: '',
+    supabasePublishableKey: '',
+    supabaseSecretKey: '',
     public: {
-      supabaseUrl: process.env.NUXT_SUPABASE_URL,
-      supabasePublishableKey: process.env.NUXT_SUPABASE_PUBLISHABLE_KEY,
+      supabaseUrl: '',
+      supabasePublishableKey: '',
     }
   },
   modules: ['shadcn-nuxt'],
